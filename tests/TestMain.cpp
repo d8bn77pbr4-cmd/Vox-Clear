@@ -1,6 +1,7 @@
 #include "../Source/PluginProcessor.h"
 #include "../Source/PluginEditor.h"
 #include <cstdio>
+#include <functional>
 
 namespace
 {
@@ -102,6 +103,10 @@ int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI init;
     juce::Random rng (5);
+    // keep the user-defaults file of the tests away from the real one
+    const auto settingsFile = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("voxclear-test.settings");
+    settingsFile.deleteFile();
+    VoxClearProcessor::settingsFileOverride() = settingsFile;
     const int total = (int) (fs * 6);
 
 
@@ -371,6 +376,116 @@ int main (int argc, char** argv)
         const size_t full = in.size() / (size_t) (block * 16) * (size_t) (block * 16);   // samples both runs processed
         for (size_t i = 0; i < full; ++i) diff = juce::jmax (diff, std::abs (outBig[i] - outSmall[i]));
         std::printf ("[big blocks] 8192-sample blocks vs 512: max difference %.2e\n", diff);
+    }
+
+    // 13) closing the window: settings stay, processing continues without the editor
+    {
+        auto p = makeProc();
+        p->setCurrentProgram (2);   // Rap - Up Front
+        setP (*p, "noise", 77.0f);
+        auto ed = std::unique_ptr<juce::AudioProcessorEditor> (p->createEditor());
+        setP (*p, "presence", 81.0f);   // changed while the window is open
+        p->editorBeingDeleted (ed.get());
+        ed.reset();                     // window closed
+        std::vector<float> in ((size_t) (fs * 2));
+        for (int i = 0; i < (int) in.size(); ++i) in[(size_t) i] = voice (i) * 0.5f + 0.005f * (rng.nextFloat() - 0.5f);
+        const auto out = run (*p, in);
+        double diff = 0.0;
+        for (size_t i = (size_t) fs; i < out.size(); ++i) diff += std::abs (out[i] - in[i - (size_t) p->getLatencySamples()]);
+        ed.reset (p->createEditor());   // reopened
+        float shownPresence = -1.0f;
+        std::function<void (juce::Component&)> find = [&] (juce::Component& c)
+        {
+            for (auto* ch : c.getChildren())
+            {
+                if (auto* sl = dynamic_cast<juce::Slider*> (ch)) if (std::abs (sl->getValue() - 81.0) < 0.01) shownPresence = (float) sl->getValue();
+                find (*ch);
+            }
+        };
+        find (*ed);
+        const int reopenedWidth = ed->getWidth();
+        ed->setSize (1200, 1200 * 728 / 1040);   // user enlarges the window
+        p->editorBeingDeleted (ed.get());
+        ed.reset (p->createEditor());
+        std::printf ("[window size] first open %d px wide | after enlarging to 1200 and reopening: %d px\n", reopenedWidth, ed->getWidth());
+        p->editorBeingDeleted (ed.get());
+        std::printf ("[window closed] noise=%.0f presence=%.0f preset=%d | still processing=%d | reopened window shows presence=%.0f\n",
+                     p->apvts.getRawParameterValue ("noise")->load(), p->apvts.getRawParameterValue ("presence")->load(),
+                     p->getCurrentProgram(), (int) (diff > 1.0), shownPresence);
+    }
+
+    // 14) save project -> reopen project: everything comes back (incl. learned noise profile and MATCH)
+    {
+        auto a = makeProc();
+        a->setCurrentProgram (4);
+        setP (*a, "tube", 63.0f); setP (*a, "mic_source", 6.0f); setP (*a, "gate", -52.0f);
+        a->denoiser.requestLearn();
+        std::vector<float> noiseIn ((size_t) (fs * 3));
+        for (auto& v : noiseIn) v = 0.01f * (rng.nextFloat() - 0.5f);
+        run (*a, noiseIn);
+        a->matchCurve[20].store (2.5f); a->hasMatch.store (true);
+        a->uiWidth.store (1100);
+        juce::MemoryBlock project;
+        a->getStateInformation (project);
+
+        auto b = makeProc();
+        b->setStateInformation (project.getData(), (int) project.getSize());
+        run (*b, std::vector<float> ((size_t) fs, 0.0f));   // profile is applied on the audio thread
+        bool same = true;
+        for (auto* prm : a->getParameters())
+            if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (prm))
+                same = same && std::abs (r->getValue() - b->apvts.getParameter (r->getParameterID())->getValue()) < 1.0e-6f;
+        std::printf ("[project reload] all %d parameters equal=%d | preset=%d | noise profile=%d | MATCH=%d (%.1f dB) | window width=%d\n",
+                     (int) a->getParameters().size(), (int) same, b->getCurrentProgram(), (int) b->denoiser.hasProfile(),
+                     (int) b->hasMatch.load(), b->matchCurve[20].load(), b->uiWidth.load());
+    }
+
+    // 15) new instance: remembers your mic + MATCH, and an optional saved default
+    {
+        {
+            auto a = makeProc();
+            setP (*a, "mic_source", 6.0f);   // Behringer C1
+            a->matchCurve[24].store (-1.5f); a->hasMatch.store (true);
+            a->clearMatch();                 // bump version ...
+            a->matchCurve[24].store (-1.5f); a->hasMatch.store (true);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (700);   // settings timer (2 Hz)
+        }
+        auto fresh = makeProc();
+        const int micRemembered = (int) fresh->apvts.getRawParameterValue ("mic_source")->load();
+        {
+            auto a = makeProc();
+            setP (*a, "push", 80.0f); setP (*a, "mic_target", 1.0f);
+            a->saveAsDefault();
+        }
+        auto withDefault = makeProc();
+        const float pushDefault = withDefault->apvts.getRawParameterValue ("push")->load();
+        const int targetDefault = (int) withDefault->apvts.getRawParameterValue ("mic_target")->load();
+        withDefault->clearDefault();
+        auto factory = makeProc();
+        std::printf ("[new instance] remembered mic=%d (6 = Behringer C1) | saved default: push=%.0f target=%d | after reset: push=%.0f, mic still=%d\n",
+                     micRemembered, pushDefault, targetDefault, factory->apvts.getRawParameterValue ("push")->load(),
+                     (int) factory->apvts.getRawParameterValue ("mic_source")->load());
+    }
+
+    // 16) Behringer C1 profile: designed correction vs. measured (white noise, neutral target, character 100 %)
+    {
+        auto p = makeProc();
+        allOff (*p);
+        setP (*p, "mic_source", 6.0f); setP (*p, "mic_target", 0.0f); setP (*p, "mic_amount", 100.0f);
+        const int len = (int) (fs * 6);
+        std::vector<float> in ((size_t) len);
+        for (auto& v : in) v = 0.1f * (rng.nextFloat() * 2.0f - 1.0f);
+        auto out = run (*p, in);
+        const int L = p->getLatencySamples();
+        std::vector<float> o (out.begin() + L, out.end());
+        std::printf ("[Behringer C1]");
+        for (float f : { 150.0f, 600.0f, 4000.0f, 7500.0f, 14000.0f })
+        {
+            float designed = 0.0f;
+            for (const auto& b : Mic::sources()[6].bands) designed += toneBandDb (b, f);
+            std::printf ("  %.0f Hz %+.1f/%+.1f", f, bandDb (o, f, (size_t) fs, (size_t) (len - L - 1000)) - bandDb (in, f, (size_t) fs, (size_t) (len - L - 1000)), designed);
+        }
+        std::printf ("  (measured/designed dB)\n");
     }
 
     // CPU: everything on, 48 kHz, 512 samples

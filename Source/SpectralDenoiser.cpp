@@ -193,6 +193,32 @@ void SpectralDenoiser::finishMatch()
     }
 }
 
+juce::String SpectralDenoiser::getProfileString() const
+{
+    if (! profileActive.load() || learned.empty()) return {};
+    juce::String text;
+    text << juce::String (sr, 1) << ";" << fftSize << ";";
+    for (size_t b = 0; b < learned.size(); ++b)
+        text << (b > 0 ? "," : "") << juce::String (10.0f * std::log10 (learned[b] + 1.0e-14f), 1);
+    return text;
+}
+
+void SpectralDenoiser::setProfileString (const juce::String& text)
+{
+    if (text.isEmpty()) { clearProfile(); return; }
+    if (profilePending.load()) return;   // previous one not applied yet
+    const auto parts = juce::StringArray::fromTokens (text, ";", {});
+    if (parts.size() != 3) return;
+    const auto values = juce::StringArray::fromTokens (parts[2], ",", {});
+    if (values.size() < 16) return;
+    pendingSr = parts[0].getDoubleValue();
+    pendingFft = parts[1].getIntValue();
+    if (pendingSr <= 0.0 || pendingFft <= 0) return;
+    pendingProfileDb.resize ((size_t) values.size());
+    for (int i = 0; i < values.size(); ++i) pendingProfileDb[(size_t) i] = values[i].getFloatValue();
+    profilePending.store (true);   // the audio thread maps it onto its own bins at the next frame
+}
+
 bool SpectralDenoiser::consumeMatchResult (std::array<float, ToneSpec::matchBands>& out)
 {
     if (! matchFinished.exchange (false)) return false;
@@ -253,7 +279,22 @@ void SpectralDenoiser::processFrame()
     }
     if (ready) firstFrame = false;
 
-    // learned profile
+    // learned profile (restored from a project: map the stored bins onto the current resolution)
+    if (profilePending.load())
+    {
+        const double dfOld = pendingSr / pendingFft;
+        const int last = (int) pendingProfileDb.size() - 1;
+        for (int b = 0; b < bins; ++b)
+        {
+            const double idx = juce::jlimit (0.0, (double) last, (double) binFreq[(size_t) b] / dfOld);
+            const int i0 = juce::jmin ((int) idx, last - 1);
+            const float db = pendingProfileDb[(size_t) i0] + (float) (idx - i0) * (pendingProfileDb[(size_t) i0 + 1] - pendingProfileDb[(size_t) i0]);
+            learned[(size_t) b] = std::pow (10.0f, db * 0.1f);
+        }
+        learned[0] = learned[1];
+        profileActive.store (true);
+        profilePending.store (false);
+    }
     if (clearRequested.exchange (false))
         profileActive.store (false);
     if (learnRequested.exchange (false))

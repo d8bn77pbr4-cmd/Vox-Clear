@@ -43,7 +43,97 @@ VoxClearProcessor::VoxClearProcessor()
     pTube      = apvts.getRawParameterValue ("tube");
     pMatchOn   = apvts.getRawParameterValue ("match_on");
     for (auto& m : matchCurve) m.store (0.0f);
+
+    juce::PropertiesFile::Options opts;
+    opts.applicationName = "Vox Clear";
+    opts.filenameSuffix = ".settings";
+    opts.folderName = "VoxClear";
+    opts.osxLibrarySubFolder = "Application Support";
+    opts.storageFormat = juce::PropertiesFile::storeAsXML;
+    const auto file = settingsFileOverride() != juce::File() ? settingsFileOverride() : opts.getDefaultFile();
+    settings = std::make_unique<juce::PropertiesFile> (file, opts);
+    applyUserDefaults();
+    startTimerHz (2);
 }
+
+VoxClearProcessor::~VoxClearProcessor()
+{
+    stopTimer();
+    timerCallback();   // don't lose a mic change made in the last half second
+}
+
+juce::File& VoxClearProcessor::settingsFileOverride()
+{
+    static juce::File file;
+    return file;
+}
+
+juce::String VoxClearProcessor::matchString() const
+{
+    juce::StringArray values;
+    for (auto& m : matchCurve) values.add (juce::String (m.load(), 3));
+    return values.joinIntoString (",");
+}
+
+void VoxClearProcessor::setMatchFromString (const juce::String& text, bool has)
+{
+    const auto values = juce::StringArray::fromTokens (text, ",", {});
+    for (size_t i = 0; i < matchCurve.size(); ++i)
+        matchCurve[i].store ((int) i < values.size() ? values[(int) i].getFloatValue() : 0.0f);
+    hasMatch.store (has && values.size() > 0);
+}
+
+void VoxClearProcessor::applyUserDefaults()
+{
+    // a fresh instance starts with the saved default (if any), then your remembered mic + MATCH
+    if (auto xml = settings->getXmlValue ("defaultState"))
+        restoreFromXml (*xml);
+    if (settings->containsKey ("micSource"))
+        if (auto* p = apvts.getParameter ("mic_source"))
+            p->setValueNotifyingHost (p->convertTo0to1 ((float) settings->getIntValue ("micSource")));
+    if (settings->containsKey ("match"))
+        setMatchFromString (settings->getValue ("match"), settings->getBoolValue ("hasMatch"));
+    lastSavedMic.store ((int) pMicSource->load());
+    lastSavedMatchVersion = matchVersion.load();
+}
+
+void VoxClearProcessor::timerCallback()
+{
+    // remember the user's microphone globally, but only when *they* changed it (not when a project loaded)
+    bool dirty = false;
+    const int mic = (int) pMicSource->load();
+    if (mic != lastSavedMic.load())
+    {
+        settings->setValue ("micSource", mic);
+        lastSavedMic.store (mic);
+        dirty = true;
+    }
+    if (matchVersion.load() != lastSavedMatchVersion)
+    {
+        settings->setValue ("match", matchString());
+        settings->setValue ("hasMatch", hasMatch.load());
+        lastSavedMatchVersion = matchVersion.load();
+        dirty = true;
+    }
+    if (dirty) settings->saveIfNeeded();
+}
+
+void VoxClearProcessor::saveAsDefault()
+{
+    if (auto xml = createStateXml())
+    {
+        settings->setValue ("defaultState", xml.get());
+        settings->saveIfNeeded();
+    }
+}
+
+void VoxClearProcessor::clearDefault()
+{
+    settings->removeValue ("defaultState");
+    settings->saveIfNeeded();
+}
+
+bool VoxClearProcessor::hasUserDefault() const { return settings->containsKey ("defaultState"); }
 
 juce::AudioProcessorValueTreeState::ParameterLayout VoxClearProcessor::createLayout()
 {
@@ -138,6 +228,7 @@ void VoxClearProcessor::clearMatch()
 {
     for (auto& m : matchCurve) m.store (0.0f);
     hasMatch.store (false);
+    ++matchVersion;
 }
 
 //==============================================================================
@@ -239,6 +330,7 @@ void VoxClearProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     {
         for (size_t i = 0; i < learnedMatch.size(); ++i) matchCurve[i].store (learnedMatch[i]);
         hasMatch.store (true);
+        ++matchVersion;   // the timer saves it as your mic's default
     }
 
     // hosts may send blocks larger than announced: process in chunks so nothing is ever allocated here
@@ -537,31 +629,39 @@ juce::AudioProcessorEditor* VoxClearProcessor::createEditor()
     return new VoxClearEditor (*this);
 }
 
-void VoxClearProcessor::getStateInformation (juce::MemoryBlock& destData)
+std::unique_ptr<juce::XmlElement> VoxClearProcessor::createStateXml()
 {
     auto state = apvts.copyState();
-    juce::StringArray values;
-    for (auto& m : matchCurve) values.add (juce::String (m.load(), 3));
-    state.setProperty ("match", values.joinIntoString (","), nullptr);
+    state.setProperty ("match", matchString(), nullptr);
     state.setProperty ("hasMatch", hasMatch.load(), nullptr);
     state.setProperty ("preset", currentProgram, nullptr);
-    if (auto xml = state.createXml())
+    state.setProperty ("noiseProfile", denoiser.getProfileString(), nullptr);
+    state.setProperty ("uiWidth", uiWidth.load(), nullptr);
+    return state.createXml();
+}
+
+void VoxClearProcessor::restoreFromXml (const juce::XmlElement& xml)
+{
+    if (! xml.hasTagName (apvts.state.getType())) return;
+    auto state = juce::ValueTree::fromXml (xml);
+    setMatchFromString (state.getProperty ("match").toString(), (bool) state.getProperty ("hasMatch", false));
+    currentProgram = (int) state.getProperty ("preset", 0);
+    denoiser.setProfileString (state.getProperty ("noiseProfile").toString());
+    uiWidth.store ((int) state.getProperty ("uiWidth", 0));
+    apvts.replaceState (state);
+    lastSavedMic.store ((int) pMicSource->load());   // a loaded project is not a "user changed the mic" event
+}
+
+void VoxClearProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    if (auto xml = createStateXml())
         copyXmlToBinary (*xml, destData);
 }
 
 void VoxClearProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
-        if (xml->hasTagName (apvts.state.getType()))
-        {
-            auto state = juce::ValueTree::fromXml (*xml);
-            const auto values = juce::StringArray::fromTokens (state.getProperty ("match").toString(), ",", {});
-            for (size_t i = 0; i < matchCurve.size(); ++i)
-                matchCurve[i].store ((int) i < values.size() ? values[(int) i].getFloatValue() : 0.0f);
-            hasMatch.store ((bool) state.getProperty ("hasMatch", false));
-            currentProgram = (int) state.getProperty ("preset", 0);
-            apvts.replaceState (state);
-        }
+        restoreFromXml (*xml);
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

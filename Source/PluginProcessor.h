@@ -6,11 +6,11 @@
 #include "SpectralDenoiser.h"
 #include "MicProfiles.h"
 
-class VoxClearProcessor : public juce::AudioProcessor
+class VoxClearProcessor : public juce::AudioProcessor, private juce::Timer
 {
 public:
     VoxClearProcessor();
-    ~VoxClearProcessor() override = default;
+    ~VoxClearProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -48,12 +48,32 @@ public:
     std::atomic<bool> hasMatch { false };
     void clearMatch();
 
+    // User defaults (stored in a small settings file next to the plugin's app data):
+    // your mic + MATCH are remembered for every new instance, plus an optional full default setting.
+    void saveAsDefault();
+    void clearDefault();
+    bool hasUserDefault() const;
+    static juce::File& settingsFileOverride();   // tests only
+
+    std::atomic<int> uiWidth { 0 };   // editor size, stored with the project
+
     // Metering (read by the editor)
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
     std::atomic<float> gateGainDb { 0.0f }, compGainDb { 0.0f }, mudCutDb { 0.0f }, boxCutDb { 0.0f }, essCutDb { 0.0f }, rideDb { 0.0f };
     std::atomic<bool> sidechainActive { false };
 
 private:
+    void timerCallback() override;
+    std::unique_ptr<juce::XmlElement> createStateXml();
+    void restoreFromXml (const juce::XmlElement& xml);
+    void applyUserDefaults();
+    juce::String matchString() const;
+    void setMatchFromString (const juce::String& text, bool has);
+
+    std::unique_ptr<juce::PropertiesFile> settings;
+    std::atomic<int> matchVersion { 0 }, lastSavedMic { -1 };
+    int lastSavedMatchVersion = 0;
+
     void processChunk (juce::AudioBuffer<float>& main, const float* side, int chans);
     void updatePushFilters (float mudCut, float boxCut, float essCut);
     ToneSpec makeToneSpec (bool listening) const;

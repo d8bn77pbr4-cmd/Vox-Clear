@@ -95,9 +95,10 @@ namespace Mic
         std::array<ToneBand, 5> bands;
     };
 
-    inline const std::array<Source, 6>& sources()
+    // New entries go at the end only: projects store the index.
+    inline const std::array<Source, 7>& sources()
     {
-        static const std::array<Source, 6> s {{
+        static const std::array<Source, 7> s {{
             { "Standard / unbekannt", "Keine Korrektur (oder MATCH verwenden)", {} },
             { "USB-Mikrofon", "Dünner Bass, nasale Mitten, harte Spitze um 7 kHz",
               {{ { B::lowShelf, 120.0f, 2.0f, 1.0f }, { B::bell, 1000.0f, -2.5f, 1.0f }, { B::bell, 7000.0f, -3.0f, 0.6f },
@@ -110,6 +111,12 @@ namespace Mic
               {{ { B::lowShelf, 150.0f, 3.0f, 1.0f }, { B::bell, 1500.0f, -3.0f, 1.0f }, { B::bell, 3000.0f, -2.0f, 1.0f },
                  { B::highShelf, 8000.0f, 3.0f, 1.0f } }} },
             { "Gutes Studio-Kondensator", "Kaum Korrektur nötig", {} },
+            // Behringer C1: budget cardioid condenser. Bright/sibilant presence peak around 5-9 kHz,
+            // a little thin, slightly boxy in small rooms, falls off above ~15 kHz. Approximation from the
+            // published response and typical use, not a measurement of an individual unit.
+            { "Behringer C1", "Zischelige Spitze 5-9 kHz, etwas dünn, Höhen über 15 kHz fallen ab",
+              {{ { B::lowShelf, 150.0f, 1.5f, 1.0f }, { B::bell, 600.0f, -1.0f, 1.2f }, { B::bell, 4000.0f, -1.5f, 1.0f },
+                 { B::bell, 7500.0f, -3.5f, 0.8f }, { B::highShelf, 14000.0f, 1.0f, 1.0f } }} },
         }};
         return s;
     }

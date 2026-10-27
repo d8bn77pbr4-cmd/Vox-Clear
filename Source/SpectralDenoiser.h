@@ -30,6 +30,10 @@ public:
     bool isLearning() const { return learning.load() || learnRequested.load(); }
     bool hasProfile() const { return profileActive.load(); }
 
+    // noise profile persistence (message thread): "sampleRate;fftSize;dB,dB,..." - empty = no profile
+    juce::String getProfileString() const;
+    void setProfileString (const juce::String& text);
+
     // MATCH: learn the microphone's long-term balance while singing (6 s of voice)
     void requestMatch() { matchRequested.store (true); }
     bool isMatching() const { return matching.load() || matchRequested.load(); }
@@ -77,6 +81,10 @@ private:
 
     std::atomic<bool> learnRequested { false }, clearRequested { false }, learning { false }, profileActive { false };
     std::atomic<bool> matchRequested { false }, matching { false }, matchFinished { false };
+    std::atomic<bool> profilePending { false };
+    std::vector<float> pendingProfileDb;   // written by the message thread only while profilePending is false
+    double pendingSr = 44100.0;
+    int pendingFft = 2048;
     std::atomic<float> reductionDb { 0.0f }, noiseFloorDb { -120.0f }, smoothDb { 0.0f }, proximityDb { 0.0f }, matchProgress { 0.0f };
 
     juce::SpinLock displayLock;

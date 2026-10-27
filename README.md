@@ -53,6 +53,22 @@ Was Spitzen-Studiomikrofone ausmacht und was davon hier per DSP umgesetzt ist:
 Ehrlich gesagt: Raumklang und Richtcharakteristik lassen sich nachträglich nicht ändern, und die Profile sind fundierte Annäherungen an typische Eigenschaften, keine vermessenen Kopien bestimmter Mikrofone.
 Die gesamte Mikro-Bearbeitung läuft in der FFT, die für die Rauschentfernung ohnehin gerechnet wird – praktisch ohne zusätzliche CPU-Last.
 
+### Behringer C1
+Unter **DEIN MIKRO → Behringer C1** auswählen. Das Profil zähmt die zischelige Spitze um 5–9 kHz, gibt etwas Körper (150 Hz),
+räumt leicht boxige Mitten auf und öffnet die Höhen über 14 kHz minimal. Es basiert auf dem veröffentlichten Frequenzgang
+und typischen Erfahrungen, nicht auf einer Messung deines Exemplars – zusätzlich einmal **MATCH LERNEN**, dann ist es auf dein Mikro eingemessen.
+Gut dazu: SMOOTH 40–60 %, Ziel-Sound *Modern Studio* oder *Classic Tube*.
+
+## Einstellungen bleiben erhalten
+
+- **Fenster schließen ist kein Problem:** Vox Clear arbeitet weiter, alle Einstellungen bleiben. Das Fenster muss nicht offen sein.
+- **Mit dem FL-Projekt gespeichert:** alle Regler, Preset, gelerntes Rauschprofil (LEARN NOISE), MATCH und Fenstergröße.
+- **Neue Instanzen:** *Dein Mikro* und *MATCH* merkt sich Vox Clear automatisch – beim nächsten Einfügen ist dein C1 schon gewählt.
+- **STANDARD** (oben): „Aktuelle Einstellungen als Standard speichern“ – jede neue Instanz startet dann mit genau diesen Einstellungen.
+  „Standard löschen“ stellt die Werkseinstellung wieder her.
+- Gespeichert wird in einer kleinen Datei: Mac `~/Library/Application Support/VoxClear/Vox Clear.settings`,
+  Windows `%APPDATA%\VoxClear\Vox Clear.settings`.
+
 ## VOCAL PUSH – nach vorne, klar, direkt
 
 | Regler | Funktion |

@@ -80,6 +80,8 @@ private:
 
     juce::ToggleButton bypass { "BYPASS" }, listen { "LISTEN" }, learn { "LEARN NOISE" };
     juce::ToggleButton matchLearn { "MATCH LERNEN" }, matchOn { "MATCH AN" }, matchReset { "RESET" };
+    juce::ToggleButton defaultButton { "STANDARD" };
+    int defaultSavedTicks = 0;   // shows a short confirmation after saving
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAtt, listenAtt, matchOnAtt;
 
     LevelMeter inMeter, outMeter, nrMeter { true }, gateMeter { true }, compMeter { true };
@@ -102,6 +104,7 @@ private:
     VoxLookAndFeel lnf;
     MainView view;
     int frame = 0;
+    bool sizeRestored = false;   // only remember sizes the user chose, not the ones set while opening
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoxClearEditor)
 };

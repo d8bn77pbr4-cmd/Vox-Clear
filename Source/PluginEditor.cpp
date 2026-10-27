@@ -340,6 +340,25 @@ MainView::MainView (VoxClearProcessor& p) : proc (p), display (p)
     matchReset.setClickingTogglesState (false);
     matchReset.onClick = [this] { proc.clearMatch(); };
 
+    addAndMakeVisible (defaultButton);
+    defaultButton.setClickingTogglesState (false);
+    defaultButton.onClick = [this]
+    {
+        juce::PopupMenu menu;
+        menu.addSectionHeader (juce::String::fromUTF8 ("Startwerte für neue Instanzen"));
+        menu.addItem (1, juce::String::fromUTF8 ("Aktuelle Einstellungen als Standard speichern"));
+        menu.addItem (2, juce::String::fromUTF8 ("Standard löschen (Werkseinstellung)"), proc.hasUserDefault());
+        menu.addSeparator();
+        menu.addItem (3, juce::String::fromUTF8 ("Dein Mikro und MATCH werden automatisch gemerkt"), false);
+        juce::Component::SafePointer<MainView> safe (this);   // the window may be closed while the menu is open
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&defaultButton), [safe] (int result)
+        {
+            if (safe == nullptr) return;
+            if (result == 1) { safe->proc.saveAsDefault(); safe->defaultSavedTicks = 120; }
+            if (result == 2) safe->proc.clearDefault();
+        });
+    };
+
     for (auto* m : { &inMeter, &outMeter, &nrMeter, &gateMeter, &compMeter })
         addAndMakeVisible (m);
 
@@ -462,9 +481,10 @@ void MainView::resized()
     const int W = designWidth;
     bypass.setBounds (W - 110, 14, 90, 28);
     listen.setBounds (W - 206, 14, 90, 28);
-    prevPreset.setBounds (380, 18, 20, 20);
-    presetBox.setBounds (406, 14, 300, 28);
-    nextPreset.setBounds (712, 18, 20, 20);
+    prevPreset.setBounds (336, 18, 20, 20);
+    presetBox.setBounds (362, 14, 300, 28);
+    nextPreset.setBounds (668, 18, 20, 20);
+    defaultButton.setBounds (710, 14, 112, 28);
 
     meterPanel = { W - 170, 64, 150, designHeight - 84 };
     {
@@ -529,6 +549,10 @@ void MainView::tick (int frame)
 
     if (frame % 6 != 0) return;   // texts and buttons: 10 Hz is plenty
 
+    defaultSavedTicks = juce::jmax (0, defaultSavedTicks - 6);
+    defaultButton.setButtonText (defaultSavedTicks > 0 ? juce::String::fromUTF8 ("GESPEICHERT â") : juce::String ("STANDARD"));
+    defaultButton.setToggleState (defaultSavedTicks > 0, juce::dontSendNotification);
+
     using juce::String;
     const bool profile = proc.denoiser.hasProfile();
     learn.setButtonText (proc.denoiser.isLearning() ? "LERNT ..." : (profile ? "PROFIL AKTIV (RESET)" : "LEARN NOISE"));
@@ -572,6 +596,7 @@ void MainView::tick (int frame)
 VoxClearEditor::VoxClearEditor (VoxClearProcessor& p)
     : AudioProcessorEditor (&p), view (p)
 {
+    const int savedWidth = p.uiWidth.load();   // read before JUCE applies any intermediate sizes
     setLookAndFeel (&lnf);
     addAndMakeVisible (view);
     setResizable (true, true);
@@ -579,7 +604,11 @@ VoxClearEditor::VoxClearEditor (VoxClearProcessor& p)
                      MainView::designWidth * 16 / 10, MainView::designHeight * 16 / 10);
     if (auto* c = getConstrainer())
         c->setFixedAspectRatio ((double) MainView::designWidth / (double) MainView::designHeight);
-    setSize (MainView::designWidth * 9 / 10, MainView::designHeight * 9 / 10);
+    // reopen at the size the user left it (stored with the project)
+    const int w = savedWidth > 0 ? juce::jlimit (MainView::designWidth * 6 / 10, MainView::designWidth * 16 / 10, savedWidth)
+                                 : MainView::designWidth * 9 / 10;
+    setSize (w, w * MainView::designHeight / MainView::designWidth);
+    sizeRestored = true;
     startTimerHz (60);
 }
 
@@ -593,6 +622,9 @@ void VoxClearEditor::resized()
 {
     const float scale = (float) getWidth() / (float) MainView::designWidth;
     view.setTransform (juce::AffineTransform::scale (scale));
+    if (sizeRestored)
+        if (auto* p = dynamic_cast<VoxClearProcessor*> (getAudioProcessor()))
+            p->uiWidth.store (getWidth());
 }
 
 void VoxClearEditor::timerCallback()
