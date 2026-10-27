@@ -1,0 +1,40 @@
+name: Build Plugins (Windows + macOS)
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release --target VoxClear_VST3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoxClear-VST3-Windows
+          path: build/VoxClear_artefacts/Release/VST3/
+
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Configure (Universal: Apple Silicon + Intel)"
+        run: cmake -B build -G Xcode -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+      - name: Build
+        run: cmake --build build --config Release --target VoxClear_VST3 VoxClear_AU
+      - name: Ad-hoc sign and package
+        run: |
+          mkdir -p dist
+          cp -R "build/VoxClear_artefacts/Release/VST3/Vox Clear.vst3" dist/
+          cp -R "build/VoxClear_artefacts/Release/AU/Vox Clear.component" dist/
+          codesign --force --deep --sign - "dist/Vox Clear.vst3"
+          codesign --force --deep --sign - "dist/Vox Clear.component"
+          ditto -c -k --keepParent dist VoxClear-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoxClear-macOS
+          path: VoxClear-macOS.zip
