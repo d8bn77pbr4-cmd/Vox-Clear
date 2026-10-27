@@ -19,7 +19,7 @@ jobs:
           path: build/VoxClear_artefacts/Release/VST3/
 
   build-macos:
-    runs-on: macos-14
+    runs-on: macos-15-intel   # Apple-Silicon runners are often at capacity; this one still builds a universal (arm64 + x86_64) plugin
     steps:
       - uses: actions/checkout@v4
       - name: "Configure (Universal: Apple Silicon + Intel)"
