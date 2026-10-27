@@ -4,6 +4,9 @@
 #include "DspUtils.h"
 #include "DeClicker.h"
 #include "SpectralDenoiser.h"
+#include "HumRemover.h"
+#include "PopRemover.h"
+#include "AutoTools.h"
 #include "MicProfiles.h"
 
 class VoxClearProcessor : public juce::AudioProcessor, private juce::Timer
@@ -42,6 +45,16 @@ public:
 
     DeClicker declicker;
     SpectralDenoiser denoiser;
+    HumRemover hum;
+    PopRemover pops;
+
+    // AUTO CLEAN: what the plugin currently uses (shown on the auto dials)
+    struct AutoValues
+    {
+        std::atomic<float> lowCut { 80.0f }, declick { 0.5f }, noise { 0.3f }, gateDb { -80.0f }, snrDb { 0.0f };
+        std::atomic<bool> ready { false };
+    };
+    AutoValues autoValues;
 
     // MATCH curve (learned from your microphone, stored with the project)
     std::array<std::atomic<float>, ToneSpec::matchBands> matchCurve {};
@@ -75,6 +88,9 @@ private:
     int lastSavedMatchVersion = 0;
 
     void processChunk (juce::AudioBuffer<float>& main, const float* side, int chans);
+    void updateAutoClean (int numSamples);
+    juce::String autoStatsString() const;
+    void restoreAutoStats (const juce::String& text);
     void updatePushFilters (float mudCut, float boxCut, float essCut);
     ToneSpec makeToneSpec (bool listening) const;
 
@@ -96,6 +112,11 @@ private:
     float compEnv = 0.0f, compGain = 1.0f;
     float vocEnv = 0.0f, beatEnv = 0.0f, rideAvgDiff = 0.0f, rideGainDb = 0.0f;
     float rideActiveSec = 0.0f;
+
+    // AUTO CLEAN state
+    QuantileTracker gatePauseDb, gateVoiceDb;   // post-noise-reduction level in pauses / while singing
+    int gateTrackCount = 0;
+    float autoNoiseS = 0.3f, autoDeclickS = 0.5f, autoGateS = -80.0f, autoLowCutS = 80.0f;
 
     juce::SmoothedValue<float> outGainS, mixS;
 
@@ -120,6 +141,8 @@ private:
     std::atomic<float>* pSmooth;
     std::atomic<float>* pTube;
     std::atomic<float>* pMatchOn;
+    std::atomic<float>* pAutoClean;
+    std::atomic<float>* pAutoStrength;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoxClearProcessor)
 };

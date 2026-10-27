@@ -10,7 +10,7 @@ namespace
     // parameters a preset never changes: they describe the user's microphone / session state
     bool presetKeepsParam (const juce::String& id)
     {
-        return id == "mic_source" || id == "match_on" || id == "bypass" || id == "listen";
+        return id == "mic_source" || id == "match_on" || id == "bypass" || id == "listen" || id == "auto_clean";
     }
 }
 
@@ -42,6 +42,8 @@ VoxClearProcessor::VoxClearProcessor()
     pSmooth    = apvts.getRawParameterValue ("smooth");
     pTube      = apvts.getRawParameterValue ("tube");
     pMatchOn   = apvts.getRawParameterValue ("match_on");
+    pAutoClean = apvts.getRawParameterValue ("auto_clean");
+    pAutoStrength = apvts.getRawParameterValue ("auto_strength");
     for (auto& m : matchCurve) m.store (0.0f);
 
     juce::PropertiesFile::Options opts;
@@ -122,6 +124,9 @@ void VoxClearProcessor::saveAsDefault()
 {
     if (auto xml = createStateXml())
     {
+        // room- and voice-specific learning stays with each project: a new project learns its own
+        xml->removeAttribute ("autoStats");
+        xml->removeAttribute ("noiseProfile");
         settings->setValue ("defaultState", xml.get());
         settings->saveIfNeeded();
     }
@@ -172,6 +177,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoxClearProcessor::createLay
     p.push_back (std::make_unique<AudioParameterFloat>  (ParameterID { "smooth", 1 },     "Smooth",       pctRange, 30.0f, pct));
     p.push_back (std::make_unique<AudioParameterFloat>  (ParameterID { "tube", 1 },       "Tube",         pctRange, 10.0f, pct));
     p.push_back (std::make_unique<AudioParameterBool>   (ParameterID { "match_on", 1 },   "Match",        true));
+    p.push_back (std::make_unique<AudioParameterBool>   (ParameterID { "auto_clean", 1 }, "Auto Clean",   true));
+    p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { "auto_strength", 1 }, "Auto Strength",
+                                                         StringArray { "Sanft", "Normal", "Stark" }, 0));
 
     return { p.begin(), p.end() };
 }
@@ -239,6 +247,8 @@ void VoxClearProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     blockCap = juce::jmax (64, samplesPerBlock);
 
     declicker.prepare (sampleRate, numCh);
+    hum.prepare (sampleRate, numCh);
+    pops.prepare (sampleRate, numCh);
     denoiser.prepare (sampleRate, numCh);
 
     const int latency = declicker.getLatency() + denoiser.getLatency();
@@ -278,6 +288,103 @@ void VoxClearProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     mixS.reset (sampleRate, 0.03);
     outGainS.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (pOutput->load()));
     mixS.setCurrentAndTargetValue (pMix->load() * 0.01f);
+}
+
+void VoxClearProcessor::updateAutoClean (int numSamples)
+{
+    // Turns the analysis into settings. Everything glides over seconds, so the plugin settles on each
+    // recording (room, voice, language, mic) without audible jumps.
+    const int strength = juce::jlimit (0, 2, (int) pAutoStrength->load());
+    const bool ready = denoiser.getVoicedSeconds() > 3.0f;   // enough voice analysed
+    auto glide = [numSamples, this] (float& v, float target, double tau)
+    {
+        v += (target - v) * (1.0f - (float) std::exp (-(double) numSamples / (tau * sr)));
+    };
+    auto interp = [] (float x, std::initializer_list<std::pair<float, float>> pts)
+    {
+        auto prev = *pts.begin();
+        if (x <= prev.first) return prev.second;
+        for (auto p : pts)
+        {
+            if (x <= p.first) return prev.second + (x - prev.first) / (p.first - prev.first) * (p.second - prev.second);
+            prev = p;
+        }
+        return prev.second;
+    };
+
+    // NOISE: the smaller the distance between voice and noise floor, the stronger
+    float noiseT = 0.3f;
+    if (ready)
+    {
+        const float snr = denoiser.getVoiceLevelDb() - denoiser.getNoiseFloorDb();
+        autoValues.snrDb.store (snr);
+        noiseT = interp (snr, { { 15.0f, 0.9f }, { 25.0f, 0.75f }, { 35.0f, 0.55f }, { 45.0f, 0.35f }, { 55.0f, 0.2f }, { 70.0f, 0.05f } });
+        noiseT = juce::jlimit (0.0f, 1.0f, noiseT * std::array<float, 3> { 0.7f, 1.0f, 1.25f }[(size_t) strength]);
+    }
+    glide (autoNoiseS, noiseT, 2.0);
+
+    // LOW CUT: just below the lowest fundamental the voice uses; higher if there is rumble
+    float lowCutT = 80.0f;
+    const float f0 = denoiser.getF0Low();
+    if (ready && f0 > 0.0f)
+    {
+        lowCutT = juce::jlimit (50.0f, 150.0f, 0.75f * f0 * std::array<float, 3> { 0.85f, 1.0f, 1.1f }[(size_t) strength]);
+        if (denoiser.getRumbleDb() > 10.0f)
+            lowCutT = juce::jmax (lowCutT, juce::jmin (100.0f, 0.85f * f0));
+    }
+    glide (autoLowCutS, lowCutT, 2.0);
+
+    // DE-CLICK depth: more clicks/crackle in this recording -> deeper
+    float depthT = juce::jlimit (0.45f, 1.0f, 0.45f + declicker.getClickRate() / 120.0f);
+    if (declicker.getCrackleRate() > 60.0f) depthT = 1.0f;
+    glide (autoDeclickS, depthT, 1.0);
+
+    // GATE: between the level of the pauses and the voice (off if they can't be separated)
+    float gateT = -80.0f;
+    if (ready && gatePauseDb.valid && gateVoiceDb.valid)
+    {
+        const float pause = gatePauseDb.value, voice = gateVoiceDb.value, range = voice - pause;
+        const float lo = pause + 4.0f, hi = voice - 25.0f;
+        if (range >= 12.0f && hi >= lo)
+            gateT = juce::jlimit (lo, hi, pause + std::array<float, 3> { 0.25f, 0.33f, 0.42f }[(size_t) strength] * range);
+    }
+    glide (autoGateS, gateT, 2.0);
+
+    autoValues.ready.store (ready);
+    autoValues.noise.store (autoNoiseS);
+    autoValues.lowCut.store (autoLowCutS);
+    autoValues.declick.store (autoDeclickS);
+    autoValues.gateDb.store (autoGateS);
+}
+
+juce::String VoxClearProcessor::autoStatsString() const
+{
+    juce::StringArray v;
+    v.add (juce::String (denoiser.getVoiceLevelDb(), 2));
+    v.add (juce::String (denoiser.getF0Low(), 2));
+    v.add (juce::String (denoiser.getVoicedSeconds(), 2));
+    v.add (juce::String (gatePauseDb.valid ? gatePauseDb.value : 999.0f, 2));
+    v.add (juce::String (gateVoiceDb.valid ? gateVoiceDb.value : 999.0f, 2));
+    v.add (juce::String (hum.getBase()));
+    v.add (juce::String (hum.getConfidence(), 2));
+    v.add (juce::String (autoNoiseS, 3));
+    v.add (juce::String (autoLowCutS, 1));
+    v.add (juce::String (autoGateS, 2));
+    return v.joinIntoString (";");
+}
+
+void VoxClearProcessor::restoreAutoStats (const juce::String& text)
+{
+    // a reopened project continues with what it had learned instead of starting from scratch
+    const auto v = juce::StringArray::fromTokens (text, ";", {});
+    if (v.size() < 10) return;
+    denoiser.seedVoiceStats (v[0].getFloatValue(), v[1].getFloatValue(), v[2].getFloatValue());
+    if (v[3].getFloatValue() < 900.0f) gatePauseDb.seed (v[3].getFloatValue());
+    if (v[4].getFloatValue() < 900.0f) gateVoiceDb.seed (v[4].getFloatValue());
+    hum.seed (v[5].getIntValue(), v[6].getFloatValue());
+    autoNoiseS = v[7].getFloatValue();
+    autoLowCutS = juce::jlimit (20.0f, 300.0f, v[8].getFloatValue());
+    autoGateS = v[9].getFloatValue();
 }
 
 void VoxClearProcessor::updatePushFilters (float mudCut, float boxCut, float essCut)
@@ -372,9 +479,17 @@ void VoxClearProcessor::processChunk (juce::AudioBuffer<float>& main, const floa
     }
 
     // ---------------- CLEAN ----------------
+    const bool autoOn = pAutoClean->load() > 0.5f;
+    const int strength = juce::jlimit (0, 2, (int) pAutoStrength->load());
+    updateAutoClean (n);
+
+    // 0) mains hum (found automatically in pauses)
+    hum.setDepth (std::array<float, 3> { -18.0f, -24.0f, -30.0f }[(size_t) strength]);
+    hum.process (main, chans);
+
     // 1) low cut (24 dB/oct Butterworth), frequency glides in the log domain
     {
-        const float target = pLowCut->load();
+        const float target = autoOn ? autoLowCutS : pLowCut->load();
         for (int start = 0; start < n; start += sub)
         {
             const int len = juce::jmin (sub, n - start);
@@ -393,17 +508,33 @@ void VoxClearProcessor::processChunk (juce::AudioBuffer<float>& main, const floa
         }
     }
 
-    // 2) mouth clicks, 3) noise + microphone tone (one FFT stage)
+    // 1b) plosive pops
+    pops.setSensitivity (std::array<float, 3> { 3.0f, 2.5f, 2.0f }[(size_t) strength]);   // +9.5 / +8 / +6 dB above the voice's loud bass
+    pops.process (main, chans);
+
+    // 2) mouth clicks / crackle, 3) noise + microphone tone (one FFT stage)
     const bool listening = pListen->load() > 0.5f;
-    declicker.setAmount (pDeclick->load() * 0.01f);
+    if (autoOn)
+    {
+        const bool crackle = declicker.getCrackleRate() > 60.0f;   // dense tiny clicks: catch the small ones too
+        declicker.setDetection (std::array<float, 3> { 3.2f, 2.7f, 2.3f }[(size_t) strength] * (crackle ? 0.85f : 1.0f));
+        declicker.setDepth (autoDeclickS);
+        declicker.setProtection (std::array<float, 3> { 0.8f, 1.2f, 2.0f }[(size_t) strength]);
+    }
+    else
+    {
+        declicker.setAmount (pDeclick->load() * 0.01f);
+        declicker.setProtection (1.0f);
+    }
     declicker.process (main, chans);
-    denoiser.setAmount (pNoise->load() * 0.01f);
+    denoiser.setAmount (autoOn ? autoNoiseS : pNoise->load() * 0.01f);
     denoiser.setTone (makeToneSpec (listening));
     denoiser.process (main, chans);
 
     // 4) gate for the pauses (downward expander with hold)
     {
-        const float thrDb = pGate->load();
+        const float thrDb = autoOn ? autoGateS : pGate->load();
+        const int trackEvery = juce::jmax (1, (int) (0.001 * sr));
         const bool gateOn = thrDb > -79.9f;
         const float envAtt = coeff (sr, 0.0005), envRel = coeff (sr, 0.01);
         const float openC = coeff (sr, 0.001), closeC = coeff (sr, 0.06);
@@ -414,6 +545,16 @@ void VoxClearProcessor::processChunk (juce::AudioBuffer<float>& main, const floa
             float lvl = 0.0f;
             for (int ch = 0; ch < chans; ++ch) lvl = juce::jmax (lvl, std::abs (main.getSample (ch, i)));
             gateEnv = lvl > gateEnv ? lvl + (gateEnv - lvl) * envAtt : lvl + (gateEnv - lvl) * envRel;
+            if (++gateTrackCount >= trackEvery)   // level statistics for AUTO (1 kHz)
+            {
+                gateTrackCount = 0;
+                const float envDb = juce::Decibels::gainToDecibels (gateEnv, -120.0f);
+                if (envDb > -110.0f)
+                {
+                    gatePauseDb.add (envDb, 0.1f, 0.05f);
+                    gateVoiceDb.add (envDb, 0.9f, 0.05f);
+                }
+            }
 
             float target = 1.0f;
             if (gateOn)
@@ -637,6 +778,7 @@ std::unique_ptr<juce::XmlElement> VoxClearProcessor::createStateXml()
     state.setProperty ("preset", currentProgram, nullptr);
     state.setProperty ("noiseProfile", denoiser.getProfileString(), nullptr);
     state.setProperty ("uiWidth", uiWidth.load(), nullptr);
+    state.setProperty ("autoStats", autoStatsString(), nullptr);
     return state.createXml();
 }
 
@@ -648,6 +790,7 @@ void VoxClearProcessor::restoreFromXml (const juce::XmlElement& xml)
     currentProgram = (int) state.getProperty ("preset", 0);
     denoiser.setProfileString (state.getProperty ("noiseProfile").toString());
     uiWidth.store ((int) state.getProperty ("uiWidth", 0));
+    restoreAutoStats (state.getProperty ("autoStats").toString());
     apvts.replaceState (state);
     lastSavedMic.store ((int) pMicSource->load());   // a loaded project is not a "user changed the mic" event
 }

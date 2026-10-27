@@ -16,8 +16,10 @@ void DeClicker::prepare (double sampleRate, int numChannels)
     endHold = juce::jmax (1, (int) std::round (0.0005 * sr));
     fastRel = (float) std::exp (-1.0 / (0.0003 * sr));
     // peak hold reference: jumps to every peak and
-    refRel = (float) std::exp (-1.0 / (0.050 * sr));     // falls slowly, so the voice's pitch pulses keep it up
+    refRel = (float) std::exp (-1.0 / (0.020 * sr));     // falls within 20 ms: pitch pulses (down to ~70 Hz) keep it up, a fricative no longer hides the next click
     gainC = (float) std::exp (-1.0 / (0.0003 * sr));
+    trackEvery = juce::jmax (1, (int) std::round (0.001 * sr));   // level statistics at 1 kHz
+    crackleLen = (int) std::round (0.0015 * sr);
     reset();
 }
 
@@ -31,13 +33,22 @@ void DeClicker::reset()
     now = 0; runStart = -1; longRun = false; lastClickEnd = -1000000; lowCount = 0; refractoryUntil = 0;
     fastEnv = refEnv = runPeak = runRef = 0.0f;
     smoothGain = 1.0f;
+    speechPeakDb = {}; hfFloorDb = {};
+    trackCount = 0;
+    clickAcc = crackleAcc = 0.0f;
 }
 
 void DeClicker::markRun (juce::int64 start, juce::int64 end, float peakRatio)
 {
-    // bring the click down towards the surrounding level; amount controls how far
+    // as loud as the speaker's own loud sounds -> a speech sound, not a mouth click: keep it
+    if (speechPeakDb.valid && runPeakLevel > protection * std::pow (10.0f, speechPeakDb.value / 20.0f))
+    {
+        ++protectedCount;
+        return;
+    }
+    // bring the click down towards the surrounding level; depth controls how far
     const float toRef = juce::jlimit (0.02f, 1.0f, 1.5f / peakRatio);
-    const float g = std::pow (toRef, juce::jmin (1.0f, 0.4f + amount));
+    const float g = std::pow (toRef, juce::jmin (1.0f, 0.4f + depth));
     for (juce::int64 t = juce::jmax ((juce::int64) 0, start - margin); t <= end + margin; ++t)
     {
         float ramp = 1.0f;
@@ -47,15 +58,18 @@ void DeClicker::markRun (juce::int64 start, juce::int64 end, float peakRatio)
         slot = juce::jmin (slot, 1.0f - ramp * (1.0f - g));
     }
     if (start - lastClickEnd > (juce::int64) (0.003 * sr))   // bursts within 3 ms belong to the same click
+    {
         ++clickCount;
+        clickAcc += 1.0f;
+        if (end - start <= crackleLen) crackleAcc += 1.0f;
+    }
     lastClickEnd = end;
 }
 
 void DeClicker::process (juce::AudioBuffer<float>& buffer, int channels)
 {
     channels = juce::jmin (channels, numCh);
-    const float thr = juce::jmap (amount, 5.0f, 2.0f);   // how far above the recent peak level
-    const bool active = amount > 0.0f;
+    const bool active = thr > 0.0f && depth > 0.0f;
 
     for (int i = 0; i < buffer.getNumSamples(); ++i)
     {
@@ -112,6 +126,16 @@ void DeClicker::process (juce::AudioBuffer<float>& buffer, int channels)
         if (runStart < 0)
             refEnv = juce::jmax (peak, refEnv * refRel);
 
+        // speaker statistics (1 kHz): quiet floor and typical loud high-frequency level
+        if (++trackCount >= trackEvery)
+        {
+            trackCount = 0;
+            const float db = gainToDb (refEnv);
+            hfFloorDb.add (db, 0.1f, 0.05f);
+            if (hfFloorDb.valid && db > hfFloorDb.value + 10.0f)
+                speechPeakDb.add (db, 0.98f, 0.05f);   // the loudest consonant peaks of this speaker
+        }
+
         // output the sample from 'lookahead' ago with its (smoothed) high-band gain
         const juce::int64 outT = now - lookahead;
         if (outT >= 0)
@@ -130,4 +154,9 @@ void DeClicker::process (juce::AudioBuffer<float>& buffer, int channels)
         }
         ++now;
     }
+    const float decay = (float) std::exp (-(double) buffer.getNumSamples() / (30.0 * sr));
+    clickAcc *= decay;
+    crackleAcc *= decay;
+    clickRate.store (clickAcc * 2.0f);     // ~events in the last 30 s -> per minute
+    crackleRate.store (crackleAcc * 2.0f);
 }

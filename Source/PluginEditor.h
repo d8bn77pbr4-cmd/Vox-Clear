@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PluginProcessor.h"
+#include <functional>
 
 class VoxLookAndFeel : public juce::LookAndFeel_V4
 {
@@ -64,13 +65,20 @@ private:
 
     void setupKnob (Knob&, const juce::String& paramId, const juce::String& name);
     void placeKnob (Knob&, juce::Rectangle<int> area);
+    void setupAutoDial (Knob&, const juce::String& name, double lo, double hi, std::function<juce::String (double)> text);
     void refreshPresetBox();
+    void updateAutoDials();
     bool presetModified() const;
 
     VoxClearProcessor& proc;
 
     CleanDisplay display;
     Knob lowCut, declick, noise, gate;
+    Knob autoLowCut, autoDeclick, autoNoise, autoGate;   // read-only: what AUTO currently uses
+    juce::ToggleButton autoButton { "AUTO" };
+    juce::ComboBox strengthBox;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> autoAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> strengthAtt;
     Knob character, smooth, tube;
     Knob push, demud, debox, presence, air, level, ride, output, mix;
 

@@ -14,6 +14,32 @@ FL-Studio-Sends werden *nach* den Insert-Effekten abgegriffen – alles, was an 
 | GATE | Schließt in den Pausen (ganz links = aus) |
 | LISTEN | Nur das hören, was entfernt wird – zum Einstellen |
 
+## AUTO CLEAN – erkennt und passt sich selbst an
+
+**AUTO** (oben rechts im CLEAN-Bereich, standardmäßig an) analysiert jede Aufnahme selbst und stellt LOW CUT, DE-CLICK,
+NOISE und GATE laufend ein – die Regler zeigen dann live, was gerade verwendet wird. Nach ca. 3 Sekunden Stimme ist die
+Analyse eingeschwungen. Stärke: **Sanft / Normal / Stark**. AUTO aus = manuelle Regler.
+
+| Häufiges Problem | Erkennung | Reaktion |
+|---|---|---|
+| Rauschen, Raumton, Lüfter | Abstand Stimme ↔ Grundrauschen (SNR) | NOISE-Stärke |
+| Geräusche in Pausen | Pegelverteilung Pausen ↔ Stimme | GATE-Schwelle dazwischen (aus, wenn nicht trennbar) |
+| Trittschall, Rumpeln | tiefste Grundfrequenz deiner Stimme, Rumpeln im Grundrauschen | LOW CUT knapp darunter |
+| Schmatzer, Knackser | Klicks/Minute | DE-CLICK-Tiefe |
+| Crackle (Speichel, Wackelkontakt) | sehr kurze Klicks in hoher Dichte | empfindlichere Erkennung, volle Tiefe |
+| Netzbrummen 50/60 Hz | Analyse der Pausen, unterscheidet 50 Hz (EU) / 60 Hz (US) | schmale Kerbfilter auf den Brumm-Obertönen |
+| Plopp-Laute (P, B) | kurzer Bass-Stoß weit über dem Bass deiner Stimme | Bass für die Dauer des Pops absenken |
+
+**Sprachunabhängig:** entschieden wird nicht nach bestimmten Lauten, sondern nach Dauer und Lautstärke im Verhältnis zu
+*deiner* Stimme. Konsonanten (t, k, sch, pf …) sind länger als ein Schmatzer und bleiben unberührt. Klicklaute, die in
+Sprachen wie Xhosa oder Zulu zum Wortschatz gehören, sind so laut wie die übrigen Konsonanten und bleiben erhalten;
+Schmatzer sind leiser und werden entfernt. Lange tiefe Töne sind länger als ein Pop und bleiben unberührt.
+
+**Pro Projekt:** Was AUTO gelernt hat, wird mit dem Projekt gespeichert – beim Öffnen geht es ohne neue Lernphase weiter.
+Ein neues Projekt (anderer Raum, andere Stimme, andere Sprache) lernt seine eigenen Werte.
+
+Nicht automatisch lösbar: starker Raumhall (Echo). Für beste Ergebnisse nah am Mikro und in einem gedämpften Raum aufnehmen.
+
 ## PRESETS
 
 Oben in der Preset-Leiste (oder im FL-Preset-Menü). Ein Preset stellt den **Sound** ein – Reinigung, Mikro-Charakter, Push –,
@@ -89,7 +115,7 @@ Gut dazu: SMOOTH 40–60 %, Ziel-Sound *Modern Studio* oder *Classic Tube*.
 
 ## Technik
 - Latenz ca. 51 ms (48 kHz) – FL gleicht das automatisch aus. Beim **Einsingen** das Plugin deaktivieren.
-- CPU: ca. 3 % eines Kerns (gemessen, alle Module inkl. Mikrofon an).
+- CPU: ca. 3,5–4,5 % eines Kerns (gemessen, alle Module inkl. AUTO, Mikrofon, Brumm- und Pop-Entfernung).
 - Fenster frei skalierbar (an der Ecke unten rechts ziehen).
 
 ## Bauen

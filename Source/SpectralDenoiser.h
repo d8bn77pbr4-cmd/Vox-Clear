@@ -6,6 +6,7 @@
 #include <atomic>
 #include <vector>
 #include "MicProfiles.h"
+#include "AutoTools.h"
 
 // STFT stage. Its main job is noise reduction (hiss, room tone, fan noise): the noise floor per
 // frequency is tracked automatically or taken from a learned profile, and gains are smoothed over
@@ -45,6 +46,13 @@ public:
     float getSmoothDb() const { return smoothDb.load(); }         // strongest resonance cut in the last frame
     float getProximityDb() const { return proximityDb.load(); }   // current bass build-up cut
 
+    // AUTO analysis of the voice (same frames, no extra FFT)
+    float getVoiceLevelDb() const { return voiceLevelDb.load(); }  // typical loud voice level (same scale as the noise floor)
+    float getF0Low() const { return f0Low.load(); }                // lowest regularly used fundamental, Hz
+    float getVoicedSeconds() const { return voicedSeconds.load(); }
+    float getRumbleDb() const { return rumbleDb.load(); }          // noise below 80 Hz relative to 150-400 Hz
+    void seedVoiceStats (float levelDb, float f0, float seconds);
+
     void copyDisplay (std::array<float, numDisplayPoints>& spectrum, std::array<float, numDisplayPoints>& noise,
                       std::array<float, numDisplayPoints>& reduction, std::array<float, numDisplayPoints>& toneCurve);
     static float displayPointToFreq (float i) { return 20.0f * std::pow (1000.0f, i / (numDisplayPoints - 1)); }
@@ -73,6 +81,11 @@ private:
     std::vector<double> prefix;
     int proxLo = 1, proxMid = 2, proxHi = 3, proxBins = 1;
     float proxAvg = 0.0f, proxTime = 0.0f, proxCut = 0.0f;
+
+    // AUTO voice statistics
+    QuantileTracker voiceQ, f0Q;
+    int f0Lo = 1, f0Hi = 2, f0Search = 3, rumbleLo = 1, rumbleMid = 2, rumbleHi = 3;
+    std::atomic<float> voiceLevelDb { -200.0f }, f0Low { 0.0f }, voicedSeconds { 0.0f }, rumbleDb { 0.0f };
 
     // MATCH learning
     std::vector<double> matchAcc;

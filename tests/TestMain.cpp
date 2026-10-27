@@ -19,6 +19,7 @@ namespace
         setP (p, "lowcut", 20.0f); setP (p, "declick", 0.0f); setP (p, "noise", 0.0f); setP (p, "gate", -80.0f);
         setP (p, "push", 0.0f); setP (p, "ride", 0.0f);
         setP (p, "mic_amount", 0.0f); setP (p, "smooth", 0.0f); setP (p, "tube", 0.0f);
+        setP (p, "auto_clean", 0.0f);   // manual mode: the classic tests check the knobs directly
     }
 
     // run a mono signal (duplicated to stereo) through the plugin, optionally with a beat sidechain
@@ -55,13 +56,13 @@ namespace
     }
 
     // simple "voice": harmonic tone at 180 Hz with phrases (on 0.6 s / off 0.4 s)
-    float voice (int i, bool gaps = true)
+    float voice (int i, bool gaps = true, double f0 = 180.0)
     {
         const double t = i / fs;
         const bool on = ! gaps || std::fmod (t, 1.0) < 0.6;
         if (! on) return 0.0f;
         double v = 0.0;
-        for (int h = 1; h <= 12; ++h) v += std::sin (juce::MathConstants<double>::twoPi * 180.0 * h * t) / h;
+        for (int h = 1; h <= 12; ++h) v += std::sin (juce::MathConstants<double>::twoPi * f0 * h * t) / h;
         return (float) (0.15 * v);
     }
 
@@ -110,6 +111,69 @@ int main (int argc, char** argv)
     const int total = (int) (fs * 6);
 
 
+    // speech-like material: voice phrases with fricatives ("s", "sch", "f"), plosives ("t", "k") and soft "p"/"b"
+    auto speechLike = [&] (int len, double f0, float noiseAmp, unsigned seed)
+    {
+        juce::Random r ((juce::int64) seed);
+        std::vector<float> x ((size_t) len);
+        juce::dsp::IIR::Filter<float> fric, burst, lowB;
+        fric.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (fs, 3500.0f);
+        burst.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (fs, 2000.0f);
+        lowB.coefficients = juce::dsp::IIR::Coefficients<float>::makeLowPass (fs, 400.0f);
+        for (int i = 0; i < len; ++i)
+        {
+            const double t = i / fs, ph = std::fmod (t, 1.0);
+            float v = voice (i, true, f0) * 0.8f;
+            const double syl = std::fmod (t, 0.25);                                      // 4 syllables per second
+            if (ph < 0.6 && syl < 0.09 && std::fmod (t, 0.5) < 0.25) v += 0.12f * fric.processSample (r.nextFloat() * 2 - 1);   // fricative
+            if (ph < 0.6 && syl > 0.20 && syl < 0.215) v += 0.18f * burst.processSample (r.nextFloat() * 2 - 1);                // t / k
+            if (ph < 0.6 && std::fmod (t, 0.5) > 0.47) v += 0.08f * lowB.processSample (r.nextFloat() * 2 - 1);                  // soft p / b
+            x[(size_t) i] = v + noiseAmp * (r.nextFloat() * 2 - 1);
+        }
+        return x;
+    };
+    auto aligned = [] (const std::vector<float>& out, int L) { return std::vector<float> (out.begin() + L, out.end()); };
+    // AUTO tests check the cleaning alone: tone, push and mic character neutral
+    auto autoProc = [&] ()
+    {
+        auto p = makeProc();
+        setP (*p, "mic_amount", 0.0f); setP (*p, "smooth", 0.0f); setP (*p, "tube", 0.0f); setP (*p, "push", 0.0f);
+        return p;
+    };
+
+    // where a click is audible (not on top of a consonant): inside vowels or in pauses
+    auto freeSpot = [] (double t)
+    {
+        const double ph = std::fmod (t, 1.0), syl = std::fmod (t, 0.25), half = std::fmod (t, 0.5);
+        return ph > 0.63 && ph < 0.97 ? true : (ph < 0.58 && syl > 0.115 && syl < 0.19 && half < 0.46);
+    };
+    auto spots = [&] (double from, double to, int count, unsigned seed)
+    {
+        juce::Random r ((juce::int64) seed);
+        std::vector<int> v;
+        for (int attempt = 0; (int) v.size() < count && attempt < 200000; ++attempt)   // never loop forever
+        {
+            const double t = from + r.nextDouble() * (to - from);
+            bool farEnough = true;
+            for (int x : v) farEnough = farEnough && std::abs (x / fs - t) > 0.06;
+            if (freeSpot (t) && freeSpot (t + 0.003) && farEnough) v.push_back ((int) (t * fs));
+        }
+        std::sort (v.begin(), v.end());
+        return v;
+    };
+    auto highBand = [] (const std::vector<float>& x)
+    {
+        juce::dsp::IIR::Filter<float> f;
+        f.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (fs, 3000.0f);
+        std::vector<float> y (x.size());
+        for (size_t i = 0; i < x.size(); ++i) y[i] = f.processSample (x[i]);
+        return y;
+    };
+    auto addClick = [] (std::vector<float>& x, int at, float amp, float decay, int len, juce::Random& r)
+    {
+        for (int k = 0; k < len; ++k) x[(size_t) (at + k)] += amp * std::exp (-k / decay) * (r.nextFloat() * 2 - 1);
+    };
+
     // 1) everything off -> output is the input, delayed by the reported latency
     {
         auto p = makeProc();
@@ -152,40 +216,33 @@ int main (int argc, char** argv)
         std::printf ("[noise 50%% + gate -45] noise in pauses: %.1f dBFS (gate gain %.1f dB)\n", rmsDb (out, at (4.65), at (4.95)), p->gateGainDb.load());
     }
 
-    // 3) mouth clicks vs. consonants
+    // 3) mouth clicks in realistic speech (manual knob 50 %): clicks go, consonants stay
     {
         auto p = makeProc();
         allOff (*p);
         setP (*p, "declick", 50.0f);
-        std::vector<float> in ((size_t) total);
-        for (int i = 0; i < total; ++i) in[(size_t) i] = voice (i, false) * 0.6f;
-        std::vector<int> clicks, consonants;
-        for (int c = 0; c < 15; ++c) clicks.push_back ((int) ((0.5 + c * 0.35) * fs));
-        for (int c = 0; c < 5; ++c) consonants.push_back ((int) ((0.67 + c * 1.05) * fs));
-        juce::dsp::IIR::Filter<float> hpf;
-        hpf.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (fs, 3000.0f);
-        for (int c : clicks)              // ~1.5 ms decaying click
-            for (int k = 0; k < 72; ++k) in[(size_t) (c + k)] += 0.5f * std::exp (-k / 15.0f) * (rng.nextFloat() * 2.0f - 1.0f);
-        for (int c : consonants)          // 25 ms "t"-like burst
-            for (int k = 0; k < 1200; ++k) in[(size_t) (c + k)] += 0.25f * std::exp (-k / 500.0f) * hpf.processSample (rng.nextFloat() * 2.0f - 1.0f);
-
+        const int len = (int) (fs * 8);
+        auto in = speechLike (len, 150.0, 0.0005f, 61);
+        const auto clean = in;
+        juce::Random r (7);
+        const auto clicks = spots (1.5, 7.5, 15, 3);
+        for (int c : clicks) addClick (in, c, 0.06f, 15.0f, 72, r);   // ~1.5 ms mouth click
         auto out = run (*p, in);
         const int L = p->getLatencySamples();
-        // measure in the high band (> 3 kHz), where mouth clicks live
-        auto highBand = [&] (const std::vector<float>& x)
+        std::vector<float> o (out.begin() + L, out.end());
+        const auto inH = highBand (in), outH = highBand (o), cleanH = highBand (clean);
+        double clickRed = 0.0;
+        for (int c : clicks) clickRed += rmsDb (inH, (size_t) c, (size_t) c + 96) - rmsDb (outH, (size_t) c, (size_t) c + 96);
+        // consonants: the whole speech high band outside the clicks
+        double sIn = 0.0, sOut = 0.0;
+        for (size_t i = (size_t) (1.5 * fs); i < (size_t) (7.5 * fs); ++i)
         {
-            juce::dsp::IIR::Filter<float> f;
-            f.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (fs, 3000.0f);
-            std::vector<float> y (x.size());
-            for (size_t i = 0; i < x.size(); ++i) y[i] = f.processSample (x[i]);
-            return y;
-        };
-        const auto inH = highBand (in), outH = highBand (out);
-        double clickRed = 0.0, consRed = 0.0;
-        for (int c : clicks)  clickRed += rmsDb (inH, (size_t) c, (size_t) c + 96) - rmsDb (outH, (size_t) (c + L), (size_t) (c + L + 96));
-        for (int c : consonants) consRed += rmsDb (inH, (size_t) c, (size_t) c + 1200) - rmsDb (outH, (size_t) (c + L), (size_t) (c + L + 1200));
-        std::printf ("[de-click 50%%] clicks (>3 kHz): %.1f dB quieter (detected %d of %d) | 't' consonants: %.1f dB change\n",
-                     clickRed / clicks.size(), p->declicker.clickCount.load(), (int) clicks.size(), consRed / consonants.size());
+            bool nearClick = false;
+            for (int c : clicks) nearClick = nearClick || (i + 200 > (size_t) c && i < (size_t) c + 300);
+            if (! nearClick) { sIn += (double) cleanH[i] * cleanH[i]; sOut += (double) outH[i] * outH[i]; }
+        }
+        std::printf ("[de-click 50%%] mouth clicks (>3 kHz): %.1f dB quieter (detected %d of %d) | consonants: %+.2f dB\n",
+                     clickRed / clicks.size(), p->declicker.clickCount.load(), (int) clicks.size(), 10.0 * std::log10 (sOut / sIn));
     }
 
     // 3b) false positives: voice phrases + light noise, no clicks at all
@@ -238,6 +295,153 @@ int main (int argc, char** argv)
         run (*p, s1, &b1);
         std::printf ("[ride 100%%] sidechain seen=%d | ride before %.1f dB, 1 s after beat +6 dB: %+.1f dB\n",
                      (int) p->sidechainActive.load(), before, p->rideDb.load());
+    }
+
+    // ===================== AUTO CLEAN =====================
+    // A1) the same voice in a quiet and in a noisy room: AUTO picks different noise / gate settings
+    {
+        auto runRoom = [&] (float noiseAmp)
+        {
+            auto p = autoProc();
+            const int len = (int) (fs * 12);
+            auto in = speechLike (len, 150.0, noiseAmp, 21);
+            auto out = aligned (run (*p, in), p->getLatencySamples());
+            const double pauseIn = rmsDb (in, (size_t) (10.68 * fs), (size_t) (10.95 * fs)), pauseOut = rmsDb (out, (size_t) (10.68 * fs), (size_t) (10.95 * fs));
+            std::printf ("[auto room] noise %5.1f dBFS -> AUTO: NOISE %3.0f %%, GATE %5.1f dB, SNR %4.1f dB | pause noise %6.1f -> %6.1f dBFS\n",
+                         20.0 * std::log10 (noiseAmp / std::sqrt (3.0)), 100.0f * p->autoValues.noise.load(), p->autoValues.gateDb.load(),
+                         p->autoValues.snrDb.load(), pauseIn, pauseOut);
+        };
+        runRoom (0.0002f);   // quiet, treated room
+        runRoom (0.004f);    // typical bedroom with laptop fan
+        runRoom (0.02f);     // loud
+    }
+
+    // A2) low cut follows the voice: deep male voice vs. high female voice
+    for (double f0 : { 95.0, 140.0, 230.0 })
+    {
+        auto p = autoProc();
+        auto in = speechLike ((int) (fs * 10), f0, 0.002f, 5);
+        run (*p, in);
+        std::printf ("[auto low cut] voice fundamental %3.0f Hz -> detected lowest %5.1f Hz -> LOW CUT %5.1f Hz\n",
+                     f0, p->denoiser.getF0Low(), p->autoValues.lowCut.load());
+    }
+
+    // A3) mains hum: 50 Hz (Europe), 60 Hz (USA) and none
+    for (int base : { 50, 60, 0 })
+    {
+        auto p = autoProc();
+        const int len = (int) (fs * 14);
+        auto in = speechLike (len, 160.0, 0.001f, 9);
+        auto clean = in;
+        for (int i = 0; i < len && base > 0; ++i)
+            for (int k = 1; k <= 6; ++k)
+                in[(size_t) i] += (0.004f / k) * (float) std::sin (juce::MathConstants<double>::twoPi * base * k * i / fs + k);
+        auto out = aligned (run (*p, in), p->getLatencySamples());
+        const size_t a = (size_t) (12.65 * fs), b = (size_t) (12.95 * fs);
+        double humIn = -200.0, humOut = -200.0;
+        if (base > 0) for (int k = 2; k <= 4; ++k) { humIn = juce::jmax (humIn, toneDb (in, base * k, a, b)); humOut = juce::jmax (humOut, toneDb (out, base * k, a, b)); }
+        std::printf ("[auto hum] %s -> detected %d Hz, active=%d", base > 0 ? (base == 50 ? "50 Hz hum" : "60 Hz hum") : "no hum   ",
+                     p->hum.getBase(), (int) p->hum.isActive());
+        if (base > 0) std::printf (" | strongest harmonic in pause %.1f -> %.1f dBFS", humIn, humOut);
+        std::printf ("\n");
+    }
+
+    // A4) plosive pops are tamed, a sung low note is not
+    {
+        auto p = autoProc();
+        const int len = (int) (fs * 10);
+        auto in = speechLike (len, 150.0, 0.001f, 13);
+        juce::dsp::IIR::Filter<float> popF;
+        popF.coefficients = juce::dsp::IIR::Coefficients<float>::makeLowPass (fs, 120.0f);
+        std::vector<int> popsAt;
+        for (int c = 0; c < 8; ++c) popsAt.push_back ((int) ((4.1 + c * 0.75) * fs));
+        juce::Random r (3);
+        for (int c : popsAt)   // 40 ms blast of air into the capsule: a low thump louder than the voice
+            for (int k = 0; k < (int) (0.04 * fs); ++k)
+                in[(size_t) (c + k)] += 0.8f * std::sin ((float) k / (0.04f * (float) fs) * juce::MathConstants<float>::pi)
+                                             * (float) std::sin (juce::MathConstants<double>::twoPi * 90.0 * k / fs);   // above the low cut
+        // a long low note at 9.0 .. 9.6 s
+        for (int i = (int) (9.0 * fs); i < (int) (9.6 * fs); ++i) in[(size_t) i] += 0.4f * (float) std::sin (juce::MathConstants<double>::twoPi * 90.0 * i / fs);
+        auto out = aligned (run (*p, in), p->getLatencySamples());
+        double popRed = 0.0;
+        for (int c : popsAt) popRed += toneDb (in, 90.0, (size_t) c, (size_t) c + (size_t) (0.04 * fs)) - toneDb (out, 90.0, (size_t) c, (size_t) c + (size_t) (0.04 * fs));
+        const double noteChange = toneDb (out, 90.0, (size_t) (9.2 * fs), (size_t) (9.55 * fs)) - toneDb (in, 90.0, (size_t) (9.2 * fs), (size_t) (9.55 * fs));
+        std::printf ("[auto pops] pops: bass %.1f dB quieter (counted %d of %d, rate %.0f/min) | long low note: %+.1f dB\n",
+                     popRed / popsAt.size(), p->pops.getPopCount(), (int) popsAt.size(), p->pops.getPopRate(), noteChange);
+    }
+
+    // A5) crackle (dense tiny clicks, e.g. saliva or a bad cable) is recognised and removed more deeply
+    {
+        auto p = autoProc();
+        const int len = (int) (fs * 12);
+        auto in = speechLike (len, 150.0, 0.001f, 17);
+        juce::Random r (8);
+        const auto cr = spots (1.0, 11.5, 50, 11);   // ~5 per second
+        for (int c : cr) addClick (in, c, 0.04f, 5.0f, 24, r);   // 0.5 ms crackle
+        auto out = aligned (run (*p, in), p->getLatencySamples());
+        const auto inH = highBand (in), outH = highBand (out);
+        double red = 0.0; int nRed = 0;
+        for (int c : cr) if (c > 8 * fs) { red += rmsDb (inH, (size_t) c, (size_t) c + 48) - rmsDb (outH, (size_t) c, (size_t) c + 48); ++nRed; }
+        std::printf ("[auto crackle] %d crackles in 10.5 s -> crackle rate %.0f/min, DE-CLICK depth %.0f %% | crackles (>3 kHz) %.1f dB quieter\n",
+                     (int) cr.size(), p->declicker.getCrackleRate(), 100.0f * p->autoValues.declick.load(), red / juce::jmax (1, nRed));
+    }
+
+    // A6) any language: consonant-rich speech (fricatives, plosives) must come through untouched
+    {
+        auto p = autoProc();
+        setP (*p, "auto_strength", 2.0f);   // even on "Stark"
+        const int len = (int) (fs * 10);
+        auto in = speechLike (len, 140.0, 0.0005f, 31);
+        auto out = aligned (run (*p, in), p->getLatencySamples());
+        juce::dsp::IIR::Filter<float> hp1, hp2;
+        hp1.coefficients = hp2.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (fs, 3000.0f);
+        std::vector<float> inH (in.size()), outH (out.size());
+        for (size_t i = 0; i < in.size(); ++i) inH[i] = hp1.processSample (in[i]);
+        for (size_t i = 0; i < out.size(); ++i) outH[i] = hp2.processSample (out[i]);
+        const size_t a = (size_t) (4 * fs), b = (size_t) (9.5 * fs);
+        std::printf ("[auto consonants] consonant energy (>3 kHz) %+.1f dB | false click detections: %d | pops: %.0f/min\n",
+                     rmsDb (outH, a, b) - rmsDb (inH, a, b), p->declicker.clickCount.load(), p->pops.getPopRate());
+    }
+    for (double f0 : { 75.0, 110.0, 260.0 })   // deep male to high female: pitch pulses must not count as clicks
+    {
+        auto p = autoProc();
+        setP (*p, "auto_strength", 2.0f);
+        run (*p, speechLike ((int) (fs * 8), f0, 0.0005f, 33));
+        std::printf ("[auto false clicks] voice at %3.0f Hz, strength Stark: %d false click detections in 8 s\n", f0, p->declicker.clickCount.load());
+    }
+
+    // A7) click consonants (e.g. Xhosa/Zulu) are as loud as speech and stay; quiet mouth clicks go
+    {
+        auto p = autoProc();
+        const int len = (int) (fs * 10);
+        auto in = speechLike (len, 150.0, 0.0005f, 41);
+        juce::Random r (4);
+        const auto all = spots (3.0, 9.5, 20, 5);
+        std::vector<int> loud, quiet;
+        for (size_t i = 0; i < all.size(); ++i) (i % 2 == 0 ? loud : quiet).push_back (all[i]);
+        for (int c : loud)  addClick (in, c, 0.5f, 15.0f, 72, r);
+        for (int c : quiet) addClick (in, c, 0.06f, 15.0f, 72, r);
+        auto out = aligned (run (*p, in), p->getLatencySamples());
+        const auto inH = highBand (in), outH = highBand (out);
+        double lr = 0.0, qr = 0.0;
+        for (int c : loud)  lr += rmsDb (inH, (size_t) c, (size_t) c + 96) - rmsDb (outH, (size_t) c, (size_t) c + 96);
+        for (int c : quiet) qr += rmsDb (inH, (size_t) c, (size_t) c + 96) - rmsDb (outH, (size_t) c, (size_t) c + 96);
+        std::printf ("[auto click language] loud click consonants: %.1f dB change (kept %d of %d) | quiet mouth clicks: %.1f dB quieter\n",
+                     lr / loud.size(), p->declicker.getProtectedCount(), (int) loud.size(), qr / quiet.size());
+    }
+
+    // A8) reopening a project: AUTO continues with what it learned
+    {
+        auto a = autoProc();
+        run (*a, speechLike ((int) (fs * 8), 120.0, 0.004f, 51));
+        juce::MemoryBlock project;
+        a->getStateInformation (project);
+        auto b = autoProc();
+        b->setStateInformation (project.getData(), (int) project.getSize());
+        run (*b, std::vector<float> ((size_t) block * 4, 0.0f));
+        std::printf ("[auto reopen] learned: low cut %.0f Hz, noise %.0f %% | reopened before any audio: ready=%d, low cut %.0f Hz, noise %.0f %%\n",
+                     a->autoValues.lowCut.load(), 100.0f * a->autoValues.noise.load(), (int) b->autoValues.ready.load(),
+                     b->autoValues.lowCut.load(), 100.0f * b->autoValues.noise.load());
     }
 
     // 6) presets: every preset applies, "Your Mic" stays untouched
@@ -513,7 +717,7 @@ int main (int argc, char** argv)
         std::vector<float> in ((size_t) block);
         juce::AudioBuffer<float> buf (2, block);
         juce::MidiBuffer m;
-        for (int b = 0; b < 400; ++b)
+        for (int b = 0; b < 800; ++b)
         {
             for (int i = 0; i < block; ++i)
             {

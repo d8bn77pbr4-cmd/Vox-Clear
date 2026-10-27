@@ -26,7 +26,9 @@ set(VOX_SOURCES
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
     Source/DeClicker.cpp
-    Source/SpectralDenoiser.cpp)
+    Source/SpectralDenoiser.cpp
+    Source/HumRemover.cpp
+    Source/PopRemover.cpp)
 
 juce_add_plugin(VoxClear
     COMPANY_NAME "VoxClearAudio"

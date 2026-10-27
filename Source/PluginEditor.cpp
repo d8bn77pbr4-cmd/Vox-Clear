@@ -73,6 +73,13 @@ void VoxLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w, i
     g.setColour (Pal::border);
     g.drawEllipse (c.x - bodyR, c.y - bodyR, bodyR * 2, bodyR * 2, 1.0f);
 
+    if (s.getProperties().getWithDefault ("auto", false))
+    {
+        g.setColour (Pal::accent);
+        g.setFont (FontOptions (jmax (8.0f, bodyR * 0.38f), Font::bold));
+        g.drawText ("AUTO", Rectangle<float> (c.x - bodyR, c.y - bodyR * 0.3f, bodyR * 2, bodyR * 0.6f), Justification::centred);
+    }
+
     if (big)
     {
         g.setColour (Pal::deep);
@@ -253,6 +260,27 @@ void CleanDisplay::paint (juce::Graphics& g)
     g.setColour (Colours::white);
     g.drawText (String ("KLICKS ENTFERNT: ") + String (lastClicks), pill, Justification::centred);
 
+    // what AUTO found in this recording
+    {
+        StringArray badges;
+        if (proc.apvts.getRawParameterValue ("auto_clean")->load() > 0.5f && ! proc.autoValues.ready.load()) badges.add ("AUTO ANALYSIERT ...");
+        if (proc.hum.isActive()) badges.add ("BRUMMEN " + String (proc.hum.getBase()) + " Hz ENTFERNT");
+        if (proc.declicker.getCrackleRate() > 60.0f) badges.add ("CRACKLE ERKANNT");
+        if (proc.pops.getLastCutDb() < -1.0f) badges.add ("POP ENTFERNT");
+        float bx = a.getX() + 10.0f;
+        g.setFont (FontOptions (10.0f, Font::bold));
+        for (auto& b : badges)
+        {
+            const float w = GlyphArrangement::getStringWidth (g.getCurrentFont(), b) + 18.0f;
+            auto r = Rectangle<float> (bx, a.getY() + 8.0f, w, 20.0f);
+            g.setColour (Pal::toneLine.withAlpha (0.9f));
+            g.fillRoundedRectangle (r, 10.0f);
+            g.setColour (Pal::screenBottom);
+            g.drawText (b, r, Justification::centred);
+            bx += w + 6.0f;
+        }
+    }
+
     String overlay;
     if (proc.denoiser.isLearning()) overlay = String::fromUTF8 ("LERNE RAUSCHEN \xe2\x80\x93 bitte 2 s nicht singen");
     else if (proc.denoiser.isMatching())
@@ -280,6 +308,17 @@ MainView::MainView (VoxClearProcessor& p) : proc (p), display (p)
     setupKnob (declick, "declick", "DE-CLICK");
     setupKnob (noise, "noise", "NOISE");
     setupKnob (gate, "gate", "GATE");
+
+    setupAutoDial (autoLowCut, "LOW CUT", 20.0, 300.0, [] (double v) { return juce::String (juce::roundToInt (v)) + " Hz"; });
+    autoLowCut.slider.setSkewFactorFromMidPoint (90.0);   // same scale as the manual knob
+    setupAutoDial (autoDeclick, "DE-CLICK", 0.0, 100.0, [] (double v) { return juce::String (juce::roundToInt (v)) + " %"; });
+    setupAutoDial (autoNoise, "NOISE", 0.0, 100.0, [] (double v) { return juce::String (juce::roundToInt (v)) + " %"; });
+    setupAutoDial (autoGate, "GATE", -80.0, -20.0, [] (double v) { return v <= -79.5 ? juce::String ("Off") : juce::String (juce::roundToInt (v)) + " dB"; });
+    addAndMakeVisible (autoButton);
+    autoAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, "auto_clean", autoButton);
+    strengthBox.addItemList ({ "Sanft", "Normal", "Stark" }, 1);
+    addAndMakeVisible (strengthBox);
+    strengthAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, "auto_strength", strengthBox);
 
     setupKnob (character, "mic_amount", "CHARACTER");
     setupKnob (smooth, "smooth", "SMOOTH");
@@ -382,6 +421,45 @@ void MainView::setupKnob (Knob& k, const juce::String& id, const juce::String& n
     k.label.setInterceptsMouseClicks (false, false);
     addAndMakeVisible (k.label);
     k.attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, id, k.slider);
+}
+
+void MainView::setupAutoDial (Knob& k, const juce::String& name, double lo, double hi, std::function<juce::String (double)> text)
+{
+    k.slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    k.slider.setTextBoxStyle (juce::Slider::TextBoxBelow, true, 80, 18);
+    k.slider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+    k.slider.setColour (juce::Slider::textBoxTextColourId, Pal::accent);
+    k.slider.setRotaryParameters (juce::MathConstants<float>::pi * 1.25f, juce::MathConstants<float>::pi * 2.75f, true);
+    k.slider.setRange (lo, hi);
+    k.slider.textFromValueFunction = std::move (text);
+    k.slider.getProperties().set ("auto", true);
+    k.slider.setInterceptsMouseClicks (false, false);   // set by the plugin, not by hand
+    k.slider.setTooltip (juce::String::fromUTF8 ("Wird automatisch eingestellt. AUTO ausschalten für manuelle Kontrolle."));
+    addChildComponent (k.slider);
+    k.label.setText (name, juce::dontSendNotification);
+    k.label.setJustificationType (juce::Justification::centred);
+    k.label.setFont (juce::FontOptions (11.5f, juce::Font::bold));
+    k.label.setInterceptsMouseClicks (false, false);
+    addChildComponent (k.label);
+}
+
+void MainView::updateAutoDials()
+{
+    const bool autoOn = proc.apvts.getRawParameterValue ("auto_clean")->load() > 0.5f;
+    const std::pair<Knob*, Knob*> pairs[] = { { &lowCut, &autoLowCut }, { &declick, &autoDeclick }, { &noise, &autoNoise }, { &gate, &autoGate } };
+    for (auto [manual, automatic] : pairs)
+    {
+        manual->slider.setVisible (! autoOn);
+        manual->label.setVisible (! autoOn);
+        automatic->slider.setVisible (autoOn);
+        automatic->label.setVisible (autoOn);
+    }
+    if (! autoOn) return;
+    auto& v = proc.autoValues;
+    autoLowCut.slider.setValue (v.lowCut.load(), juce::dontSendNotification);
+    autoDeclick.slider.setValue (100.0 * v.declick.load(), juce::dontSendNotification);
+    autoNoise.slider.setValue (100.0 * v.noise.load(), juce::dontSendNotification);
+    autoGate.slider.setValue (v.gateDb.load(), juce::dontSendNotification);
 }
 
 void MainView::placeKnob (Knob& k, juce::Rectangle<int> area)
@@ -507,10 +585,16 @@ void MainView::resized()
     {
         auto area = juce::Rectangle<int> (display.getRight() + 12, cleanPanel.getY() + 28, 308, 192);
         auto top = area.removeFromTop (96), bottom = area;
-        placeKnob (lowCut, top.removeFromLeft (154));
+        placeKnob (lowCut, top.withWidth (154));
+        placeKnob (autoLowCut, top.removeFromLeft (154));
         placeKnob (declick, top);
-        placeKnob (noise, bottom.removeFromLeft (154));
+        placeKnob (autoDeclick, top);
+        placeKnob (noise, bottom.withWidth (154));
+        placeKnob (autoNoise, bottom.removeFromLeft (154));
         placeKnob (gate, bottom);
+        placeKnob (autoGate, bottom);
+        strengthBox.setBounds (cleanPanel.getRight() - 16 - 104, cleanPanel.getY() + 5, 104, 22);
+        autoButton.setBounds (strengthBox.getX() - 6 - 70, cleanPanel.getY() + 5, 70, 22);
         learn.setBounds (display.getRight() + 66, cleanPanel.getBottom() - 30, 200, 24);
     }
 
@@ -546,11 +630,12 @@ void MainView::tick (int frame)
     gateMeter.setLevel (proc.gateGainDb.load());
     compMeter.setLevel (proc.compGainDb.load());
     display.refresh();
+    updateAutoDials();
 
     if (frame % 6 != 0) return;   // texts and buttons: 10 Hz is plenty
 
     defaultSavedTicks = juce::jmax (0, defaultSavedTicks - 6);
-    defaultButton.setButtonText (defaultSavedTicks > 0 ? juce::String::fromUTF8 ("GESPEICHERT â") : juce::String ("STANDARD"));
+    defaultButton.setButtonText (defaultSavedTicks > 0 ? juce::String::fromUTF8 ("GESPEICHERT \xe2\x9c\x93") : juce::String ("STANDARD"));
     defaultButton.setToggleState (defaultSavedTicks > 0, juce::dontSendNotification);
 
     using juce::String;
@@ -567,9 +652,24 @@ void MainView::tick (int frame)
     const auto& targets = Mic::targets();
     const int t = juce::jlimit (0, (int) targets.size() - 1, targetBox.getSelectedId() - 1);
 
-    const String newStatus = "Rauschminderung " + String (proc.denoiser.getReductionDb(), 1) + " dB" + sep()
-                           + "Profil: " + (profile ? "gelernt" : "automatisch") + sep()
-                           + "Grundrauschen " + String (juce::roundToInt (proc.denoiser.getNoiseFloorDb())) + " dBFS";
+    String newStatus;
+    if (proc.apvts.getRawParameterValue ("auto_clean")->load() > 0.5f)
+    {
+        if (! proc.autoValues.ready.load())
+            newStatus = String::fromUTF8 ("AUTO analysiert deine Aufnahme \xe2\x80\x93 einfach singen oder sprechen ...");
+        else
+        {
+            newStatus = "Erkannt: SNR " + String (juce::roundToInt (proc.autoValues.snrDb.load())) + " dB" + sep()
+                      + "Stimme ab " + String (juce::roundToInt (proc.denoiser.getF0Low())) + " Hz" + sep()
+                      + "Klicks " + String (juce::roundToInt (proc.declicker.getClickRate())) + "/min" + sep()
+                      + "Pops " + String (juce::roundToInt (proc.pops.getPopRate())) + "/min";
+            if (proc.hum.isActive()) newStatus += sep() + "Brummen " + String (proc.hum.getBase()) + " Hz";
+        }
+    }
+    else
+        newStatus = "Rauschminderung " + String (proc.denoiser.getReductionDb(), 1) + " dB" + sep()
+                  + "Profil: " + (profile ? "gelernt" : "automatisch") + sep()
+                  + "Grundrauschen " + String (juce::roundToInt (proc.denoiser.getNoiseFloorDb())) + " dBFS";
     const String newMic = "Live: harte Resonanzen -" + String (proc.denoiser.getSmoothDb(), 1) + " dB" + sep()
                         + "Nahbesprechung -" + String (proc.denoiser.getProximityDb(), 1) + " dB";
     const String newPush = "Live: Matsch -" + String (proc.mudCutDb.load(), 1) + " dB" + sep()

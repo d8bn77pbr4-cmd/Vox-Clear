@@ -49,6 +49,8 @@ void SpectralDenoiser::prepare (double sampleRate, int numChannels)
     auto binOf = [this] (float f) { return juce::jlimit (1, fftSize / 2, (int) std::round (f * fftSize / sr)); };
     proxLo = binOf (80.0f); proxMid = binOf (250.0f); proxHi = binOf (3000.0f);
     proxBins = binOf (1500.0f);
+    f0Lo = binOf (65.0f); f0Hi = binOf (420.0f); f0Search = binOf (1000.0f);
+    rumbleLo = binOf (25.0f); rumbleMid = binOf (80.0f); rumbleHi = binOf (400.0f);
 
     for (int i = 0; i < numDisplayPoints; ++i)
     {
@@ -148,6 +150,16 @@ void SpectralDenoiser::updateToneTarget()
     toneTarget[0] = toneTarget[1];
     cachedTone = tone;
     toneValid = true;
+}
+
+void SpectralDenoiser::seedVoiceStats (float levelDb, float f0, float seconds)
+{
+    if (seconds <= 0.0f) return;
+    voiceQ.seed (levelDb);
+    if (f0 > 0.0f) f0Q.seed (f0);
+    voiceLevelDb.store (levelDb);
+    f0Low.store (f0);
+    voicedSeconds.store (seconds);
 }
 
 void SpectralDenoiser::finishMatch()
@@ -351,6 +363,41 @@ void SpectralDenoiser::processFrame()
     reductionDb.store ((float) (10.0 * std::log10 ((inSum + 1.0e-20) / (outSum + 1.0e-20))));
     noiseFloorDb.store ((float) (10.0 * std::log10 (noiseSum + 1.0e-20)));
     const bool voiced = ! firstFrame && framePow > 8.0 * noiseSum && framePow > 1.0e-6;
+
+    // ---- AUTO voice statistics: loud level (80th percentile) and lowest fundamental (10th percentile) ----
+    if (voiced)
+    {
+        voiceQ.add ((float) (10.0 * std::log10 (framePow)), 0.8f, 0.3f);
+        voiceLevelDb.store (voiceQ.value);
+        voicedSeconds.store (voicedSeconds.load() + frameSec);
+
+        // fundamental = first clear spectral peak between 65 and 420 Hz (well above noise, near the frame maximum)
+        float maxP = 0.0f;
+        for (int b = f0Lo; b < f0Search; ++b) maxP = juce::jmax (maxP, power[(size_t) b]);
+        for (int b = juce::jmax (2, f0Lo); b < f0Hi; ++b)
+        {
+            const float p = power[(size_t) b];
+            const float n = useProfile ? learned[(size_t) b] : 1.1f * minPow[(size_t) b];
+            if (p > power[(size_t) b - 1] && p >= power[(size_t) b + 1] && p > 30.0f * n && p > maxP * 0.003f)
+            {
+                // parabolic interpolation for sub-bin accuracy
+                const float a = std::log (power[(size_t) b - 1]), c = std::log (power[(size_t) b + 1]), m = std::log (p);
+                const float off = 0.5f * (a - c) / (a - 2.0f * m + c);
+                const float f = ((float) b + juce::jlimit (-0.5f, 0.5f, off)) * (float) sr / (float) fftSize;
+                f0Q.add (f, 0.1f, 2.0f);
+                f0Low.store (f0Q.value);
+                break;
+            }
+        }
+    }
+    {
+        // rumble: low-frequency noise compared with the 80..400 Hz noise floor
+        double lo = 0.0, mid = 0.0;
+        for (int b = rumbleLo; b < rumbleMid; ++b) lo += (useProfile ? learned[(size_t) b] : minPow[(size_t) b]);
+        for (int b = rumbleMid; b < rumbleHi; ++b) mid += (useProfile ? learned[(size_t) b] : minPow[(size_t) b]);
+        const double loAvg = lo / juce::jmax (1, rumbleMid - rumbleLo), midAvg = mid / juce::jmax (1, rumbleHi - rumbleMid);
+        rumbleDb.store ((float) (10.0 * std::log10 ((loAvg + 1.0e-20) / (midAvg + 1.0e-20))));
+    }
 
     // ---- microphone tone curve (smoothed per frame, so preset changes glide instead of jumping) ----
     if (! toneValid || ! tone.sameCurveAs (cachedTone))
