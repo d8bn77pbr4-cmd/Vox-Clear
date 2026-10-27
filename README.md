@@ -14,6 +14,45 @@ FL-Studio-Sends werden *nach* den Insert-Effekten abgegriffen – alles, was an 
 | GATE | Schließt in den Pausen (ganz links = aus) |
 | LISTEN | Nur das hören, was entfernt wird – zum Einstellen |
 
+## PRESETS
+
+Oben in der Preset-Leiste (oder im FL-Preset-Menü). Ein Preset stellt den **Sound** ein – Reinigung, Mikro-Charakter, Push –,
+lässt aber **„Dein Mikro“ und das gelernte MATCH** unverändert. So funktioniert jedes Preset mit jedem Mikrofon.
+Ein `*` hinter dem Namen zeigt, dass du danach etwas verändert hast. Preset-Wechsel gleiten weich über (kein Knacken).
+
+| Preset | Wofür |
+|---|---|
+| Natural – Clean & Open | Dezent, natürlich, moderner Studio-Klang |
+| Home Studio Rescue | Starke Reinigung für unbehandelte Räume |
+| Rap – Up Front | Dicht, direkt, laut vorne |
+| Pop Lead – Airy | Glänzend, luftig, weiche S-Laute |
+| R&B / Soul – Warm | Röhren-Wärme, voller Körper |
+| Trap Melodic – Bright & Tight | Straff, hell, präsent |
+| Singer-Songwriter – Intimate | Nah, warm, samtig |
+| Podcast / Voice-Over | Gleichmäßig, satt, verständlich |
+| Ad-Libs & Doubles | Schlanker, damit die Lead-Stimme vorne bleibt |
+| Rock / Grit | Mehr Biss und Sättigung |
+| Laptop / Headset Fix | Maximale Aufwertung einfacher Mikros |
+| Clean Only | Nur reinigen, kein Charakter |
+
+## MIKROFON – jedes Mikro auf Studio-Niveau
+
+Was Spitzen-Studiomikrofone ausmacht und was davon hier per DSP umgesetzt ist:
+
+| Eigenschaft hochwertiger Mikros | Umsetzung |
+|---|---|
+| Ausgewogener, glatter Frequenzgang | **DEIN MIKRO** gleicht typische Schwächen aus (USB, Budget-Kondensator, Bühnen-Dynamisch, Headset) · **MATCH** misst dein Mikro beim Singen ein |
+| Charakter (warm, modern, luftig, dunkel) | **ZIEL-SOUND**: Classic Tube, Modern Studio, Bright Pop, Broadcast Dynamic, Velvet Ribbon · Intensität mit **CHARACTER** |
+| Keine spitzen, harten Kapsel-Resonanzen | **SMOOTH**: erkennt feste schmale Resonanzen im Langzeit-Spektrum und senkt sie ab – Obertöne und Formanten der Stimme bleiben unberührt |
+| Kontrollierter Bass bei Nahbesprechung | automatische **Nahbesprechungs-Kontrolle** (an CHARACTER gekoppelt) |
+| Röhren-/Übertrager-Dichte | **TUBE**: 2./3. Oberton, nur im Band unter 6 kHz – kein Aliasing, ohne Oversampling |
+| Geringes Eigenrauschen | NOISE (Bereich CLEAN) |
+
+**MATCH:** „MATCH LERNEN“ klicken und 6 s normal singen. Die gelernte Korrektur (max. ±4 dB, im Bass höchstens −2 dB) wird mit dem Projekt gespeichert. „MATCH AN“ schaltet sie ein/aus, „RESET“ löscht sie.
+
+Ehrlich gesagt: Raumklang und Richtcharakteristik lassen sich nachträglich nicht ändern, und die Profile sind fundierte Annäherungen an typische Eigenschaften, keine vermessenen Kopien bestimmter Mikrofone.
+Die gesamte Mikro-Bearbeitung läuft in der FFT, die für die Rauschentfernung ohnehin gerechnet wird – praktisch ohne zusätzliche CPU-Last.
+
 ## VOCAL PUSH – nach vorne, klar, direkt
 
 | Regler | Funktion |
@@ -34,7 +73,8 @@ FL-Studio-Sends werden *nach* den Insert-Effekten abgegriffen – alles, was an 
 
 ## Technik
 - Latenz ca. 51 ms (48 kHz) – FL gleicht das automatisch aus. Beim **Einsingen** das Plugin deaktivieren.
-- CPU: ca. 2,5 % eines Kerns (gemessen, alle Module an).
+- CPU: ca. 3 % eines Kerns (gemessen, alle Module inkl. Mikrofon an).
+- Fenster frei skalierbar (an der Ecke unten rechts ziehen).
 
 ## Bauen
 GitHub → *Actions* → Artefakte **VoxClear-VST3-Windows** / **VoxClear-macOS**.

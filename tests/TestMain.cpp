@@ -17,12 +17,14 @@ namespace
     {
         setP (p, "lowcut", 20.0f); setP (p, "declick", 0.0f); setP (p, "noise", 0.0f); setP (p, "gate", -80.0f);
         setP (p, "push", 0.0f); setP (p, "ride", 0.0f);
+        setP (p, "mic_amount", 0.0f); setP (p, "smooth", 0.0f); setP (p, "tube", 0.0f);
     }
 
     // run a mono signal (duplicated to stereo) through the plugin, optionally with a beat sidechain
-    std::vector<float> run (VoxClearProcessor& p, const std::vector<float>& in, const std::vector<float>* beat = nullptr)
+    std::vector<float> run (VoxClearProcessor& p, const std::vector<float>& in, const std::vector<float>* beat = nullptr, int blk = block)
     {
         const int chans = beat ? 4 : 2;
+        const int block = blk;
         juce::AudioBuffer<float> buf (chans, block);
         juce::MidiBuffer m;
         std::vector<float> out (in.size(), 0.0f);
@@ -62,6 +64,32 @@ namespace
         return (float) (0.15 * v);
     }
 
+    // level of x in a narrow band around f (band-pass + RMS), for frequency-response checks
+    double bandDb (const std::vector<float>& x, float f, size_t a, size_t b, float q = 4.3f)
+    {
+        juce::dsp::IIR::Filter<float> bp;
+        bp.coefficients = juce::dsp::IIR::Coefficients<float>::makeBandPass (fs, f, q);
+        double s = 0.0;
+        for (size_t i = 0; i < b; ++i)
+        {
+            const float y = bp.processSample (x[i]);
+            if (i >= a) s += (double) y * y;
+        }
+        return 10.0 * std::log10 (s / (double) (b - a) + 1.0e-20);
+    }
+
+    // amplitude of a sine component at f (correlation)
+    double toneDb (const std::vector<float>& x, double f, size_t a, size_t b)
+    {
+        double re = 0.0, im = 0.0;
+        for (size_t i = a; i < b; ++i)
+        {
+            const double ph = juce::MathConstants<double>::twoPi * f * (double) i / fs;
+            re += x[i] * std::cos (ph); im += x[i] * std::sin (ph);
+        }
+        return 20.0 * std::log10 (2.0 * std::sqrt (re * re + im * im) / (double) (b - a) + 1.0e-12);
+    }
+
     double rmsDb (const std::vector<float>& x, size_t a, size_t b)
     {
         double s = 0.0;
@@ -86,7 +114,8 @@ int main (int argc, char** argv)
         auto out = run (*p, in);
         const int L = p->getLatencySamples();
         float err = 0.0f;
-        for (int i = L + 1000; i < total - block; ++i) err = juce::jmax (err, std::abs (out[(size_t) i] - in[(size_t) (i - L)]));
+        // from 0.5 s on: parameters set after prepare glide to their new values first (that is the anti-zipper smoothing)
+        for (int i = L + (int) (0.5 * fs); i < total - block; ++i) err = juce::jmax (err, std::abs (out[(size_t) i] - in[(size_t) (i - L)]));
         std::printf ("[identity] latency %d samples (%.1f ms), max error %.2e\n", L, 1000.0 * L / fs, err);
     }
 
@@ -206,10 +235,149 @@ int main (int argc, char** argv)
                      (int) p->sidechainActive.load(), before, p->rideDb.load());
     }
 
+    // 6) presets: every preset applies, "Your Mic" stays untouched
+    {
+        auto p = makeProc();
+        setP (*p, "mic_source", 3.0f);
+        bool ok = true;
+        for (int i = 0; i < p->getNumPrograms(); ++i)
+        {
+            p->setCurrentProgram (i);
+            ok = ok && p->getCurrentProgram() == i && (int) p->apvts.getRawParameterValue ("mic_source")->load() == 3;
+        }
+        p->setCurrentProgram (4);   // R&B / Soul - Warm
+        std::printf ("[presets] %d presets, all applied=%d, mic kept=%d | R&B: target=%d tube=%.0f amount=%.0f\n", p->getNumPrograms(), (int) ok,
+                     (int) p->apvts.getRawParameterValue ("mic_source")->load(), (int) p->apvts.getRawParameterValue ("mic_target")->load(),
+                     p->apvts.getRawParameterValue ("tube")->load(), p->apvts.getRawParameterValue ("mic_amount")->load());
+    }
+
+    // 7) smoothness: switching presets while a sine plays must not click
+    {
+        auto p = makeProc();
+        p->setCurrentProgram (11);   // Clean Only
+        const int len = (int) (fs * 4);
+        std::vector<float> in ((size_t) len), out ((size_t) len);
+        for (int i = 0; i < len; ++i) in[(size_t) i] = 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 330.0 * i / fs);
+        juce::AudioBuffer<float> buf (2, block);
+        juce::MidiBuffer m;
+        for (int s0 = 0; s0 + block <= len; s0 += block)
+        {
+            if (s0 == (int) (2.0 * fs) / block * block) p->setCurrentProgram (9);   // -> Rock / Grit (tube, EQ, leveler)
+            for (int i = 0; i < block; ++i) { buf.setSample (0, i, in[(size_t) (s0 + i)]); buf.setSample (1, i, in[(size_t) (s0 + i)]); }
+            p->processBlock (buf, m);
+            for (int i = 0; i < block; ++i) out[(size_t) (s0 + i)] = buf.getSample (0, i);
+        }
+        auto maxD2 = [&] (int a, int b) { float mx = 0; for (int i = a; i < b; ++i) mx = juce::jmax (mx, std::abs (out[(size_t) i + 1] - 2 * out[(size_t) i] + out[(size_t) i - 1])); return mx; };
+        const int L = p->getLatencySamples(), sw = (int) (2.0 * fs) + L;
+        const float steadyBefore = maxD2 (sw - 20000, sw - 2000), around = maxD2 (sw - 2000, sw + 20000), steadyAfter = maxD2 (sw + 40000, sw + 60000);
+        std::printf ("[smooth switch] max 2nd difference: before %.4f | during switch %.4f | after %.4f  (click would be >> both)\n", steadyBefore, around, steadyAfter);
+    }
+
+    // 8) mic character curves: white noise through "Bright Pop" at 100 %, compared with the designed curve
+    {
+        auto p = makeProc();
+        allOff (*p);
+        setP (*p, "mic_target", 3.0f);
+        setP (*p, "mic_amount", 100.0f);
+        const int len = (int) (fs * 6);
+        std::vector<float> in ((size_t) len);
+        for (auto& v : in) v = 0.1f * (rng.nextFloat() * 2.0f - 1.0f);
+        auto out = run (*p, in);
+        const int L = p->getLatencySamples();
+        std::vector<float> outAligned (out.begin() + L, out.end());
+        std::printf ("[mic curve Bright Pop] freq: measured / designed dB\n");
+        for (float f : { 120.0f, 350.0f, 1000.0f, 3500.0f, 9000.0f, 14000.0f })
+        {
+            float designed = 0.0f;
+            for (const auto& b : Mic::targets()[3].bands) designed += toneBandDb (b, f);
+            const double meas = bandDb (outAligned, f, (size_t) fs, (size_t) (len - L - 1000)) - bandDb (in, f, (size_t) fs, (size_t) (len - L - 1000));
+            std::printf ("   %6.0f Hz: %+5.1f / %+5.1f\n", f, meas, designed);
+        }
+    }
+
+    // 9) SMOOTH: a harsh, narrow capsule resonance at 6.5 kHz gets tamed, the rest stays
+    {
+        auto measure = [&] (float smoothAmt, float resFreq = 6500.0f, float resQ = 12.0f, float resDb = 12.0f)
+        {
+            auto p = makeProc();
+            allOff (*p);
+            setP (*p, "smooth", smoothAmt);
+            const int len = (int) (fs * 10);
+            std::vector<float> in ((size_t) len);
+            juce::dsp::IIR::Filter<float> res, pink;
+            res.coefficients = juce::dsp::IIR::Coefficients<float>::makePeakFilter (fs, resFreq, resQ, juce::Decibels::decibelsToGain (resDb));
+            pink.coefficients = juce::dsp::IIR::Coefficients<float>::makeFirstOrderLowPass (fs, 2000.0f);
+            for (int i = 0; i < len; ++i)
+            {
+                const float w = rng.nextFloat() * 2.0f - 1.0f;
+                in[(size_t) i] = res.processSample (0.3f * pink.processSample (w) + 0.05f * w) * (voice (i) != 0.0f ? 1.0f : 0.02f);
+            }
+            auto out = run (*p, in);
+            const int L = p->getLatencySamples();
+            std::vector<float> o (out.begin() + L, out.end());
+            const size_t from = (size_t) (5 * fs), to = (size_t) (len - L - 1000);   // settled (long-term analysis needs a few seconds)
+            return std::make_pair (bandDb (o, resFreq, from, to, 2.0f * resQ) - bandDb (in, resFreq, from, to, 2.0f * resQ),
+                                   bandDb (o, 2000.0f, from, to) - bandDb (in, 2000.0f, from, to));
+        };
+        const auto off = measure (0.0f), on = measure (100.0f);
+        std::printf ("[smooth 100%%] 6.5 kHz resonance: %+.1f dB (off: %+.1f) | 2 kHz neighbour: %+.1f dB\n", on.first, off.first, on.second);
+        const auto broad = measure (100.0f, 3000.0f, 1.5f, 6.0f);
+        std::printf ("[smooth 100%%] broad +6 dB formant-like bump at 3 kHz (should mostly stay): %+.1f dB\n", broad.first);
+    }
+
+    // 10) TUBE: harmonics of a 200 Hz sine at -6 dBFS
+    {
+        auto p = makeProc();
+        allOff (*p);
+        setP (*p, "tube", 100.0f);
+        const int len = (int) (fs * 2);
+        std::vector<float> in ((size_t) len);
+        for (int i = 0; i < len; ++i) in[(size_t) i] = 0.5f * (float) std::sin (juce::MathConstants<double>::twoPi * 200.0 * i / fs);
+        auto out = run (*p, in);
+        const double f1 = toneDb (out, 200.0, (size_t) fs, (size_t) len - 600), h2 = toneDb (out, 400.0, (size_t) fs, (size_t) len - 600), h3 = toneDb (out, 600.0, (size_t) fs, (size_t) len - 600);
+        std::printf ("[tube 100%%] 2nd harmonic %.1f dB, 3rd harmonic %.1f dB below the fundamental\n", f1 - h2, f1 - h3);
+    }
+
+    // 11) MATCH: a dull microphone (high frequencies rolled off) gets a high-frequency correction
+    {
+        auto p = makeProc();
+        allOff (*p);
+        setP (*p, "mic_amount", 100.0f);   // tone path active, neutral target
+        setP (*p, "mic_target", 0.0f);
+        p->denoiser.requestMatch();
+        const int len = (int) (fs * 14);
+        std::vector<float> in ((size_t) len);
+        juce::dsp::IIR::Filter<float> dull;
+        dull.coefficients = juce::dsp::IIR::Coefficients<float>::makeLowPass (fs, 2500.0f, 0.7f);
+        for (int i = 0; i < len; ++i)
+        {
+            const double t = i / fs;
+            float v = 0.0f;
+            if (std::fmod (t, 1.0) < 0.7) v = voice (i, false) + 0.05f * (rng.nextFloat() * 2.0f - 1.0f);   // bright source with breath
+            in[(size_t) i] = dull.processSample (v) + 0.0005f * (rng.nextFloat() * 2.0f - 1.0f);
+        }
+        run (*p, in);
+        std::printf ("[match] learned=%d | correction at 250 Hz %+.1f, 1 kHz %+.1f, 4 kHz %+.1f, 8 kHz %+.1f dB\n", (int) p->hasMatch.load(),
+                     p->matchCurve[11].load(), p->matchCurve[17].load(), p->matchCurve[23].load(), p->matchCurve[26].load());
+    }
+
+    // 12) host sends a block 16x larger than announced: same result, no allocation path
+    {
+        auto a = makeProc(), b = makeProc();
+        std::vector<float> in ((size_t) (fs * 2));
+        for (int i = 0; i < (int) in.size(); ++i) in[(size_t) i] = voice (i) * 0.5f;
+        const auto outSmall = run (*a, in, nullptr, block), outBig = run (*b, in, nullptr, block * 16);
+        float diff = 0.0f;
+        const size_t full = in.size() / (size_t) (block * 16) * (size_t) (block * 16);   // samples both runs processed
+        for (size_t i = 0; i < full; ++i) diff = juce::jmax (diff, std::abs (outBig[i] - outSmall[i]));
+        std::printf ("[big blocks] 8192-sample blocks vs 512: max difference %.2e\n", diff);
+    }
+
     // CPU: everything on, 48 kHz, 512 samples
     {
         auto p = makeProc (true);
-        setP (*p, "ride", 50.0f); setP (*p, "gate", -50.0f);
+        p->setCurrentProgram (1);   // Home Studio Rescue: heavy everything
+        setP (*p, "ride", 50.0f); setP (*p, "mic_source", 1.0f);
         const int len = (int) (fs * 20);
         std::vector<float> in ((size_t) len), beat ((size_t) len);
         for (int i = 0; i < len; ++i) { in[(size_t) i] = voice (i) * 0.5f + 0.003f * (rng.nextFloat() - 0.5f); beat[(size_t) i] = 0.1f * (rng.nextFloat() - 0.5f); }
